@@ -13,6 +13,49 @@
 - **Tripwire** 非補償性升級偵測（退款 / 投訴 / 找主管等關鍵詞）
 - 自動產出 PDF 總覽報告（群組排名 + 各群組逐項分析 + I6 sparkline 圖表）
 
+---
+
+## 範例報告
+
+以下為 10 個工作群組的實際分析輸出（使用去識別化 pseudo 對話）。
+
+📄 [下載完整 PDF 報告](docs/sample_report/sample_report.pdf)
+
+### 第 1 頁 — 群組總覽與排名
+
+![總覽頁](docs/sample_report/page_01.png)
+
+### 第 2 頁 — 最高風險群組詳細分析
+
+![住宅翻新_陳太太](docs/sample_report/page_02.png)
+
+### 第 3 頁 — I6 語義熵 sparkline 範例（健身房規劃群組）
+
+![健身房規劃](docs/sample_report/page_03.png)
+
+### 第 4–5 頁 — 中風險群組分析
+
+![科技公司大廳](docs/sample_report/page_04.png)
+
+![品牌旗艦店](docs/sample_report/page_05.png)
+
+<details>
+<summary>📋 查看剩餘 9 頁（點擊展開）</summary>
+
+![page 6](docs/sample_report/page_06.png)
+![page 7](docs/sample_report/page_07.png)
+![page 8](docs/sample_report/page_08.png)
+![page 9](docs/sample_report/page_09.png)
+![page 10](docs/sample_report/page_10.png)
+![page 11](docs/sample_report/page_11.png)
+![page 12](docs/sample_report/page_12.png)
+![page 13](docs/sample_report/page_13.png)
+![page 14](docs/sample_report/page_14.png)
+
+</details>
+
+---
+
 ## 快速開始
 
 ### 安裝依賴
@@ -60,6 +103,8 @@ python main.py --conversations data/conversations --report-dir reports
 
 Windows 建議使用 `python -X utf8 main.py` 避免中文亂碼。
 
+---
+
 ## 專案結構
 
 ```
@@ -78,8 +123,12 @@ line_chat/
 │   └── report_writer.py      # PDF 報告產生（reportlab）
 ├── tech/
 │   └── technical_spec.md     # 各指標計算方式技術文件
+├── docs/
+│   └── sample_report/        # 範例報告截圖與 PDF
 └── reports/                  # 執行後自動產生（不納入版控）
 ```
+
+---
 
 ## 指標說明
 
@@ -95,6 +144,8 @@ line_chat/
 **綜合分數** = 0.35×I1 + 0.20×I2 + 0.15×I3 + 0.30×I4
 
 Tripwire 觸發時，綜合分數強制拉高至 ≥ 0.95。
+
+---
 
 ## 技術文件
 
