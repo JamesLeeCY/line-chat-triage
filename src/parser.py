@@ -11,7 +11,7 @@ LINE export format:
 """
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,14 +33,22 @@ class Message:
     is_escalation_marker: bool = False
 
 
+# LINE timestamps are handled as naive local time of the groups (Taiwan)
+CONVERSATION_TZ = timezone(timedelta(hours=8))
+
 _DATE_RE = re.compile(r"^(\d{4})\.(\d{2})\.(\d{2})\s+星期")
 _MSG_RE = re.compile(r"^(\d{2}):(\d{2})\t(.+?)\t(.+)$")
 _SYSTEM_SENDERS = {"", "系統訊息"}
 
 
 def load_employees(path: str) -> set[str]:
+    """
+    One employee per line: a display name (LINE export) or a LINE userId (webhook).
+    Text after '#' is a comment, e.g. `U1234...  # 成員1`.
+    """
     lines = Path(path).read_text(encoding="utf-8").splitlines()
-    return {l.strip() for l in lines if l.strip() and not l.startswith("#")}
+    entries = (l.split("#", 1)[0].strip() for l in lines)
+    return {e for e in entries if e}
 
 
 def parse_file(filepath: str, employees: set[str]) -> tuple[str, list[Message]]:

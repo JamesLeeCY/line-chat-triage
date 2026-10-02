@@ -98,8 +98,34 @@ python main.py --conversations data/conversations --report-dir reports
 ### 測試
 
 ```bash
-pip install pytest
+pip install pytest httpx
 python -m pytest
+```
+
+### 接收 LINE 即時訊息（webhook）
+
+LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍需用匯出 `.txt`。
+
+1. 在 LINE Official Account Manager 建立官方帳號並啟用 Messaging API，於 LINE Developers Console 取得 **Channel secret** 與 **Channel access token**
+2. 官方帳號設定：開啟「允許加入群組」，並**關閉自動回應訊息與加入好友歡迎訊息**，避免 Bot 在客戶群組裡發言
+3. 啟動 webhook（開發時可用 `ngrok http 8000` 取得公開 HTTPS 網址）：
+   ```bash
+   uvicorn src.line_webhook:create_app_from_env --factory --port 8000
+   ```
+4. Developers Console → Webhook URL 填 `https://<host>/callback`，開啟 Use webhook，按 Verify
+5. 把官方帳號邀進群組；收到訊息後列出成員 userId，將員工的 userId 加入 `employees.txt`（可加 `# 註解` 標示姓名）：
+   ```bash
+   python -X utf8 -m src.line_store data/line.db
+   ```
+6. 從資料庫跑 triage：
+   ```bash
+   python -X utf8 main.py --line-db data/line.db --report
+   ```
+
+不接 LINE 也能在本機演練整條路徑：啟動 webhook 後，用匯出檔重播成已簽章的事件：
+
+```bash
+python -X utf8 tools/replay_export.py data/conversations/*.txt --url http://localhost:8000/callback
 ```
 
 ### 環境變數
@@ -107,6 +133,9 @@ python -m pytest
 | 變數 | 說明 |
 |------|------|
 | `ANTHROPIC_API_KEY` | Claude API 金鑰（僅 `--llm` 模式需要） |
+| `LINE_CHANNEL_SECRET` | 驗證 webhook 簽章（webhook 必填） |
+| `LINE_CHANNEL_ACCESS_TOKEN` | 查詢群組名稱與成員顯示名稱（選填；未設定時以 userId 顯示） |
+| `LINE_DB_PATH` | webhook 資料庫路徑（預設 `data/line.db`） |
 
 Windows 建議使用 `python -X utf8 main.py` 避免中文亂碼。
 
@@ -127,7 +156,13 @@ line_chat/
 │   ├── metrics.py            # I1–I6 指標計算
 │   ├── dashboard.py          # 終端機排名輸出
 │   ├── llm_extractor.py      # I3 LLM 議題抽取（Claude）
-│   └── report_writer.py      # PDF 報告產生（reportlab）
+│   ├── report_writer.py      # PDF 報告產生（reportlab）
+│   ├── line_webhook.py       # LINE webhook 接收（FastAPI、簽章驗證、名稱查詢）
+│   ├── line_adapter.py       # webhook 事件 → 資料列
+│   └── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
+├── tools/
+│   └── replay_export.py      # 將匯出檔重播為 webhook 事件（本機演練用）
+├── tests/                    # pytest
 ├── tech/
 │   └── technical_spec.md     # 各指標計算方式技術文件
 ├── docs/

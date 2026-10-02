@@ -2,7 +2,8 @@
 LINE 群組健康度 Triage 系統
 
 Usage:
-    python main.py [--conversations data/conversations] [--employees data/employees.txt]
+    python main.py [--conversations data/conversations | --line-db data/line.db]
+                   [--employees data/employees.txt]
                    [--now YYYY-MM-DDTHH:MM] [--llm] [--llm-threshold 0.3]
                    [--report] [--report-dir reports]
 """
@@ -22,8 +23,7 @@ from src.metrics import compute_metrics
 from src.dashboard import rank_groups, render_text
 
 
-def process_group(filepath: str, employees: set[str], now: datetime):
-    group_id, messages = parse_file(filepath, employees)
+def process_group(group_id: str, messages: list, now: datetime):
     messages = merge_fragments(messages, window_secs=60)
     messages = enrich(messages)
     return compute_metrics(group_id, messages, now=now), messages
@@ -66,6 +66,8 @@ def run_llm_extraction(metrics_list, messages_map, threshold: float):
 def main():
     parser = argparse.ArgumentParser(description="LINE 群組 Triage 系統")
     parser.add_argument("--conversations", default="data/conversations", help="對話檔資料夾")
+    parser.add_argument("--line-db", default=None,
+                        help="改從 LINE webhook 收集的 SQLite 讀取（指定時忽略 --conversations）")
     parser.add_argument("--employees", default="data/employees.txt", help="員工清單")
     parser.add_argument("--now", default=None, help="模擬當前時間 (YYYY-MM-DDTHH:MM)")
     parser.add_argument("--llm", action="store_true", help="啟用 Phase 2 LLM 議題抽取")
@@ -78,22 +80,21 @@ def main():
     now = datetime.fromisoformat(args.now) if args.now else datetime.now()
     employees = load_employees(args.employees)
 
-    conv_dir = Path(args.conversations)
-    files = list(conv_dir.glob("*.txt"))
-    if not files:
-        print(f"找不到對話檔於 {conv_dir}", file=sys.stderr)
+    sources = _line_db_sources(args.line_db, employees) if args.line_db         else _file_sources(args.conversations, employees)
+    if not sources:
+        print(f"找不到任何群組資料於 {args.line_db or args.conversations}", file=sys.stderr)
         sys.exit(1)
 
     all_metrics = []
     messages_map = {}
-    for f in files:
+    for name, load in sources:
         try:
-            m, messages = process_group(str(f), employees, now)
+            m, messages = process_group(*load(), now)
             all_metrics.append(m)
             messages_map[m.group_id] = messages
-            print(f"[OK] {f.name}: {len(m.tripwire_reasons)} tripwire, composite={m.composite:.3f}")
+            print(f"[OK] {name}: {len(m.tripwire_reasons)} tripwire, composite={m.composite:.3f}")
         except Exception as e:
-            print(f"[ERROR] {f.name}: {e}", file=sys.stderr)
+            print(f"[ERROR] {name}: {e}", file=sys.stderr)
 
     if args.llm:
         print(f"\n[Phase 2] LLM 議題抽取 (門檻={args.llm_threshold}) ...")
@@ -105,6 +106,27 @@ def main():
 
     if args.report:
         _generate_pdf(ranked, messages_map, now, args.report_dir)
+
+
+def _file_sources(conv_dir: str, employees: set[str]):
+    """[(display_name, loader)] for LINE export .txt files."""
+    return [
+        (f.name, lambda f=f: parse_file(str(f), employees))
+        for f in sorted(Path(conv_dir).glob("*.txt"))
+    ]
+
+
+def _line_db_sources(db_path: str, employees: set[str]):
+    """[(display_name, loader)] for groups collected by the LINE webhook."""
+    from src.line_store import LineStore
+
+    if not Path(db_path).exists():
+        return []
+    store = LineStore(db_path)
+    return [
+        (name or group_id, lambda g=group_id: store.load_group(g, employees))
+        for group_id, name in store.list_groups()
+    ]
 
 
 def _generate_pdf(ranked, messages_map, now, report_dir):

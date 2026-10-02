@@ -1,2 +1,4 @@
 anthropic>=0.40.0
 reportlab>=4.0.0
+fastapi>=0.110.0
+uvicorn>=0.29.0

@@ -9,6 +9,10 @@ venv/
 dist/
 build/
 
+# LINE webhook database (real customer conversations)
+data/*.db
+data/*.db-journal
+
 # Reports (generated at runtime)
 reports/
 

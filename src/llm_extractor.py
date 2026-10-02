@@ -6,17 +6,14 @@ Only called when cheap metrics trigger or tripwire fires (tiered execution).
 """
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Optional
 
 import anthropic
 
-from .parser import Message
+from .parser import CONVERSATION_TZ, Message
 
 _client: Optional[anthropic.Anthropic] = None
-
-# LINE exports carry no timezone; timestamps are local time of the export (Taiwan)
-CONVERSATION_TZ = timezone(timedelta(hours=8))
 
 
 def _get_client() -> anthropic.Anthropic:
