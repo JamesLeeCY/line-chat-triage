@@ -140,13 +140,20 @@ def _line_db_sources(db_path: str, employees: set[str]):
 
 def _telegram_sources(path: str, employees: set[str]):
     """[(display_name, loader)] for group chats in Telegram Desktop JSON exports."""
-    from src.telegram_export import find_exports, load_export, parse_chat
+    from src.telegram_export import IncompleteExportError, find_exports, load_export, parse_chat
 
-    return [
-        (chat.get("name") or str(chat.get("id")), lambda c=chat: parse_chat(c, employees))
-        for export in find_exports(path)
-        for chat in load_export(str(export))
-    ]
+    sources = []
+    for export in find_exports(path):
+        try:
+            chats = load_export(str(export))
+        except IncompleteExportError as e:
+            print(f"[略過] {e}", file=sys.stderr)
+            continue
+        sources += [
+            (chat.get("name") or str(chat.get("id")), lambda c=chat: parse_chat(c, employees))
+            for chat in chats
+        ]
+    return sources
 
 
 def _generate_pdf(ranked, messages_map, now, report_dir):

@@ -11,6 +11,8 @@ Media mirrors the LINE export: stickers / GIFs and uncaptioned photos or videos
 carry no text; a caption keeps the message as text so a question isn't lost.
 """
 import json
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -94,10 +96,60 @@ def parse_chat(chat: dict, employees: set[str]) -> tuple[str, list[Message]]:
     return group_name, messages
 
 
+class IncompleteExportError(ValueError):
+    """result.json is not valid JSON — usually an export that was interrupted or is still running."""
+
+
+_CHAT_LIST_RE = re.compile(r'"chats"\s*:\s*\{.*?"list"\s*:\s*\[', re.DOTALL)
+_CHAT_NAME_RE = re.compile(r'"name"\s*:\s*("(?:[^"\\]|\\.)*"|null)')
+
+
+def recover_chats(text: str) -> tuple[list[dict], Optional[str]]:
+    """
+    Salvage the fully written chats from a truncated full-account export.
+    Returns (complete_chats, name_of_truncated_chat). The truncated chat is
+    dropped entirely: a partial history would skew age / window metrics.
+    """
+    m = _CHAT_LIST_RE.search(text)
+    if not m:
+        return [], None
+
+    decoder = json.JSONDecoder()
+    pos, chats = m.end(), []
+    while True:
+        while pos < len(text) and text[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(text) or text[pos] == "]":
+            return chats, None
+        try:
+            chat, pos = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            name = _CHAT_NAME_RE.search(text, pos, pos + 2000)
+            return chats, json.loads(name.group(1)) if name else None
+        chats.append(chat)
+
+
 def load_export(path: str) -> list[dict]:
-    """Return the group chats contained in a result.json (single-chat or full export)."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    chats = (data.get("chats") or {}).get("list") if "chats" in data else [data]
+    """
+    Return the group chats contained in a result.json (single-chat or full export).
+    A truncated full export yields its complete chats, with a warning on stderr.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+        chats = (data.get("chats") or {}).get("list") if "chats" in data else [data]
+    except json.JSONDecodeError as e:
+        chats, truncated = recover_chats(text)
+        if not chats:
+            raise IncompleteExportError(
+                f"{path} 不是完整的 JSON（第 {e.lineno} 行，檔案共 {text.count(chr(10)) + 1} 行）。"
+                "通常是 Telegram 匯出尚未完成或被中斷，請確認匯出視窗顯示完成後再試。"
+            ) from e
+        print(
+            f"[警告] {path} 匯出不完整：已讀取 {len(chats)} 個完整對話，"
+            f"略過被截斷的「{truncated or '未知'}」及其後所有對話。",
+            file=sys.stderr,
+        )
     return [c for c in chats or [] if c.get("type") in _GROUP_TYPES]
 
 
@@ -120,10 +172,13 @@ def list_participants(chat: dict) -> list[tuple[Optional[str], str, int]]:
 
 
 if __name__ == "__main__":
-    import sys
-
     for export in find_exports(sys.argv[1] if len(sys.argv) > 1 else "data/telegram"):
-        for chat in load_export(str(export)):
+        try:
+            chats = load_export(str(export))
+        except IncompleteExportError as e:
+            print(f"[略過] {e}", file=sys.stderr)
+            continue
+        for chat in chats:
             print(f"\n[{chat.get('name')}]  id={chat.get('id')}  ({export})")
             for from_id, name, n in list_participants(chat):
                 print(f"  {from_id}  {name}  ({n} 則)")

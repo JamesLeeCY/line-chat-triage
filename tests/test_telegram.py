@@ -8,7 +8,9 @@ from src.enrichment import enrich
 from src.line_store import local_to_ms
 from src.metrics import compute_metrics
 from src.parser import load_employees, merge_fragments, parse_file
-from src.telegram_export import find_exports, list_participants, load_export, parse_chat
+from src.telegram_export import (
+    IncompleteExportError, find_exports, list_participants, load_export, parse_chat,
+)
 
 CONVERSATIONS = sorted(Path("data/conversations").glob("*.txt"))
 
@@ -106,6 +108,26 @@ def test_load_export_single_chat_and_full_export(tmp_path):
     assert [c["name"] for c in load_export(str(full))] == ["測試群組", "小群組"]
     assert find_exports(str(tmp_path)) == [single, full]
     assert find_exports(str(single)) == [single]
+
+
+def test_truncated_single_chat_export_raises_clear_error(tmp_path):
+    full = json.dumps(CHAT, ensure_ascii=False, indent=1)
+    path = tmp_path / "result.json"
+    path.write_text(full[: len(full) // 2], encoding="utf-8")  # export interrupted midway
+    with pytest.raises(IncompleteExportError, match="匯出尚未完成或被中斷"):
+        load_export(str(path))
+
+
+def test_truncated_full_export_keeps_complete_chats(tmp_path, capsys):
+    chats = [CHAT, {**CHAT, "name": "第二群", "id": 2}, {**CHAT, "name": "被截斷的群", "id": 3}]
+    full = json.dumps({"about": "x", "chats": {"about": "y", "list": chats}}, ensure_ascii=False, indent=1)
+    cut = full.index('"name": "被截斷的群"') + 300  # stop inside the third chat
+    path = tmp_path / "result.json"
+    path.write_text(full[:cut], encoding="utf-8")
+
+    assert [c["name"] for c in load_export(str(path))] == ["測試群組", "第二群"]
+    err = capsys.readouterr().err
+    assert "已讀取 2 個完整對話" in err and "被截斷的群" in err
 
 
 # --- end to end: same conversation via LINE export and Telegram export ---
