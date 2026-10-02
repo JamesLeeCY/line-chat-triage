@@ -116,6 +116,7 @@ def score_sentiment(text: str) -> float:
 _ESCALATION_KEYWORDS = [
     "退費", "退錢", "退款", "退訂金", "退訂", "投訴", "換人",
     "找你主管", "找你老闆", "找主管", "找老闆", "跟你主管談", "跟你老闆談",
+    "找你們主管", "找你們老闆", "跟你們主管談", "跟你們老闆談",
     "解約", "取消合約", "告你", "法院", "消保", "消費者保護",
 ]
 
@@ -130,5 +131,6 @@ def enrich(messages: list[Message]) -> list[Message]:
     for msg in messages:
         msg.dialogue_act = classify_dialogue_act(msg)
         msg.sentiment = score_sentiment(msg.text)
-        msg.is_escalation_marker = has_escalation_marker(msg.text)
+        # Only customers escalate; staff mentioning 退款/主管 is explaining, not escalating
+        msg.is_escalation_marker = msg.role == "customer" and has_escalation_marker(msg.text)
     return messages

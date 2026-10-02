@@ -45,7 +45,7 @@ def run_llm_extraction(metrics_list, messages_map, threshold: float):
         print(f"  [LLM] 抽取議題: {m.group_id} (composite={m.composite:.3f}) ...", end=" ", flush=True)
         try:
             issues = extract_issues(m.group_id, messages)
-            i3_sev, i3_age = compute_i3(issues, m.computed_at)
+            i3_sev, i3_age = compute_i3(issues, m.computed_at, messages)
             m.i3_issues = issues
             m.i3_severity = i3_sev
             m.i3_oldest_age_min = i3_age

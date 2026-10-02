@@ -95,6 +95,13 @@ python main.py --report --llm --llm-threshold 0.3
 python main.py --conversations data/conversations --report-dir reports
 ```
 
+### 測試
+
+```bash
+pip install pytest
+python -m pytest
+```
+
 ### 環境變數
 
 | 變數 | 說明 |
@@ -143,7 +150,7 @@ line_chat/
 
 **綜合分數** = 0.35×I1 + 0.20×I2 + 0.15×I3 + 0.30×I4
 
-Tripwire 觸發時，綜合分數強制拉高至 ≥ 0.95。
+Tripwire 觸發時，綜合分數強制拉高至 ≥ 0.95。升級詞只計客戶訊息，且只看最近 72 小時。
 
 ---
 

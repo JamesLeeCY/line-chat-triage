@@ -6,7 +6,7 @@ Only called when cheap metrics trigger or tripwire fires (tiered execution).
 """
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import anthropic
@@ -14,6 +14,9 @@ import anthropic
 from .parser import Message
 
 _client: Optional[anthropic.Anthropic] = None
+
+# LINE exports carry no timezone; timestamps are local time of the export (Taiwan)
+CONVERSATION_TZ = timezone(timedelta(hours=8))
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -34,12 +37,12 @@ _SYSTEM = """\
     {
       "issue_id": "string (短流水號, e.g. ISS-001)",
       "raised_by": "customer | staff",
-      "raised_at": "ISO8601 timestamp (UTC)",
+      "raised_at": "YYYY-MM-DDTHH:MM:SS（沿用對話紀錄的本地時間，不轉時區、不加時區後綴）",
       "summary": "一句話（不超過40字）描述議題",
       "type": "question | request | complaint | report",
       "status": "resolved | unresolved | unclear",
       "resolution_evidence": "string（已解決時簡述依據；未解決則空字串）",
-      "last_activity_at": "ISO8601 timestamp (UTC)",
+      "last_activity_at": "YYYY-MM-DDTHH:MM:SS（同上，本地時間）",
       "evidence_msg_ids": ["msg_id string"]
     }
   ]
@@ -113,9 +116,31 @@ def extract_issues(
     return issues
 
 
+def _to_local_naive(dt: datetime) -> datetime:
+    """Normalize to naive local time so it compares with LINE message timestamps."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(CONVERSATION_TZ).replace(tzinfo=None)
+    return dt
+
+
+def _issue_raised_at(iss: dict, msg_times: dict[str, datetime]) -> Optional[datetime]:
+    """
+    Prefer the earliest timestamp of the issue's evidence messages (ground truth);
+    fall back to the LLM-reported raised_at.
+    """
+    evidence = [msg_times[mid] for mid in iss.get("evidence_msg_ids") or [] if mid in msg_times]
+    if evidence:
+        return min(evidence)
+    try:
+        return _to_local_naive(datetime.fromisoformat(iss.get("raised_at", "").replace("Z", "+00:00")))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def compute_i3(
     issues: list[dict],
     now: datetime,
+    messages: Optional[list[Message]] = None,
     warn_min: float = 60,
     crit_min: float = 480,
 ) -> tuple[float, float]:
@@ -126,22 +151,19 @@ def compute_i3(
     if not issues:
         return 0.0, 0.0
 
+    msg_times = {msg.msg_id: msg.timestamp for msg in messages or []}
+    now = _to_local_naive(now)
+
     oldest_min = 0.0
     for iss in issues:
-        if iss.get("status") in ("unresolved", "unclear"):
-            raised_at_str = iss.get("raised_at", "")
-            try:
-                raised_at = datetime.fromisoformat(raised_at_str.replace("Z", "+00:00"))
-                # Make now offset-aware if raised_at has tzinfo
-                now_cmp = now
-                if raised_at.tzinfo is not None and now.tzinfo is None:
-                    from datetime import timezone
-                    now_cmp = now.replace(tzinfo=timezone.utc)
-                age_min = (now_cmp - raised_at).total_seconds() / 60
-                if age_min > oldest_min:
-                    oldest_min = age_min
-            except (ValueError, TypeError):
-                pass
+        if iss.get("status") not in ("unresolved", "unclear"):
+            continue
+        raised_at = _issue_raised_at(iss, msg_times)
+        if raised_at is None:
+            continue
+        age_min = (now - raised_at).total_seconds() / 60
+        if age_min > oldest_min:
+            oldest_min = age_min
 
     if oldest_min <= 0:
         return 0.0, 0.0

@@ -1,7 +1,7 @@
 # LINE 群組健康度 Triage 系統 — 技術規格文件
 
-**版本**：1.2.0  
-**更新日期**：2026-06-23  
+**版本**：1.2.1  
+**更新日期**：2026-10-02  
 **對應原始碼**：`src/parser.py`、`src/enrichment.py`、`src/metrics.py`、`src/llm_extractor.py`、`src/report_writer.py`
 
 ---
@@ -245,7 +245,7 @@ score = (正面詞命中數 - 負面詞命中數) / (正面詞命中數 + 負面
 |------|--------|
 | 退款要求 | 退費、退錢、退款、退訂金、退訂 |
 | 投訴行為 | 投訴、換人 |
-| 升級對象 | 找你主管、找你老闆、找主管、找老闆、跟你主管談、跟你老闆談 |
+| 升級對象 | 找你主管、找你老闆、找主管、找老闆、跟你主管談、跟你老闆談、找你們主管、找你們老闆、跟你們主管談、跟你們老闆談 |
 | 法律行動 | 解約、取消合約、告你、法院、消保、消費者保護 |
 
 命中任一關鍵詞，該訊息的 `is_escalation_marker` 設為 `True`。
@@ -352,7 +352,7 @@ P90 = 10 個問題中最慢的那個（而不是最快的），能合理反映�
 
 1. 接收 LLM 回傳的 `issues` 清單（見第 12 節）
 2. 篩選 `status in ("unresolved", "unclear")` 的議題
-3. 對每個開放議題，計算 `raised_at` 到 `now` 的總分鐘數（**不限業務時間**，I3 使用絕對時間）
+3. 對每個開放議題，計算提出時間到 `now` 的總分鐘數（**不限業務時間**，I3 使用絕對時間）。提出時間優先取 `evidence_msg_ids` 對應原始訊息中最早的時間戳；找不到時才採用 LLM 回傳的 `raised_at`，若帶時區則換算為台灣本地時間（UTC+8）後再比較
 4. 取最大值作為 `i3_oldest_age_min`
 
 **Severity 轉換參數**：
@@ -531,7 +531,7 @@ PDF 報告中的 sparkline 圖（`src/report_writer.py :: _entropy_chart()`）�
 
 | 條件 | 說明 |
 |------|------|
-| 任一訊息含升級詞彙 | `msg.is_escalation_marker == True`（全部歷史） |
+| 客戶訊息含升級詞彙 | `msg.is_escalation_marker == True`，且訊息落在 `now` 前 72 小時內（`tripwire_window_hours`，與 I4 視窗一致）；員工訊息不計 |
 | I1 最老未回覆提問 ≥ 8 業務小時 | `i1_oldest_age_min >= 480` |
 
 **設計理由**：客戶說出「退款」「投訴」「找主管」時，這是一個**方向性訊號**，代表關係已惡化到特定程度。此類訊號的風險不能用「其他指標都很好」來抵銷，因此使用不可補償的紅旗機制確保必定被看到。
@@ -655,12 +655,12 @@ LLM 回傳的每個議題包含以下欄位：
 | `issue_id` | str | 短流水號（如 ISS-001） |
 | `group_id` | str | 系統附加，非 LLM 產生 |
 | `raised_by` | str | `customer` \| `staff` |
-| `raised_at` | str | ISO8601 UTC 時間戳 |
+| `raised_at` | str | 本地時間 `YYYY-MM-DDTHH:MM:SS`（與對話紀錄同格式，不轉時區） |
 | `summary` | str | 不超過 40 字的一句話摘要 |
 | `type` | str | `question` \| `request` \| `complaint` \| `report` |
 | `status` | str | `resolved` \| `unresolved` \| `unclear` |
 | `resolution_evidence` | str | 已解決時的依據摘要 |
-| `last_activity_at` | str | ISO8601 UTC 時間戳 |
+| `last_activity_at` | str | 本地時間 `YYYY-MM-DDTHH:MM:SS` |
 | `evidence_msg_ids` | list[str] | 相關訊息的 msg_id 列表 |
 
 ### 判斷準則（System Prompt 節錄）
@@ -691,7 +691,7 @@ python -X utf8 main.py --llm --llm-threshold 0.3
 | 對話行為分類為 regex | 複雜句型可能誤判 | 積累真實標注後訓練分類器 |
 | `_service_minutes` 逐分鐘迭代 | 長時間段效能下降 | 改用數學公式計算 |
 | I3 使用掛鐘時間（非業務時間） | 假日長時間會誇大 severity | 評估是否改用業務時間 |
-| Tripwire 歷史永久有效 | 已解決的退款事件仍永久觸發 | 加入「已解決」標記後可關閉 |
+| Tripwire 以固定 72h 視窗失效 | 72h 內已處理完的升級仍會觸發；超過 72h 仍未處理的升級不再觸發（改由 I1/I4 反映） | 結合 I3「已解決」判定決定是否關閉 |
 | I6 使用字元 bigram 而非語意向量 | 無法捕捉同義詞或上下文語意 | Phase 3：sentence embedding 距離計算真實語意熵 |
 | I6 不計入 composite | 熵的高低目前僅供觀察，未量化為風險 | 累積歷史資料後進行相關性驗證，再決定是否納入 |
 

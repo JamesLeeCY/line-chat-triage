@@ -141,6 +141,7 @@ def compute_metrics(
     now: Optional[datetime] = None,
     service_hours: tuple[int, int] = SERVICE_HOURS,
     weights: dict[str, float] = None,
+    tripwire_window_hours: float = 72,
 ) -> GroupMetrics:
     now = now or datetime.now()
     weights = weights or {"i1": 0.35, "i2": 0.20, "i3": 0.15, "i4": 0.30}
@@ -209,9 +210,11 @@ def compute_metrics(
     m.i5_msg_count_24h = sum(1 for msg in messages if msg.timestamp >= cutoff_24h)
 
     # --- Tripwire ---
+    # Escalations expire after the window so a handled complaint doesn't pin the group forever
+    escalation_cutoff = now - timedelta(hours=tripwire_window_hours)
     reasons = []
     for msg in messages:
-        if msg.is_escalation_marker:
+        if msg.is_escalation_marker and escalation_cutoff <= msg.timestamp <= now:
             reasons.append(f"升級詞觸發 (msg_id={msg.msg_id}): {msg.text[:30]}")
     if m.i1_oldest_age_min >= 480:  # 8 business hours hard cap
         reasons.append(f"未回應提問超過8業務小時 ({m.i1_oldest_age_min:.0f}分鐘)")
