@@ -102,6 +102,22 @@ pip install pytest httpx
 python -m pytest
 ```
 
+### 匯入 Telegram 群組歷史
+
+1. 電腦版 Telegram Desktop →「設定」→「進階」→「匯出 Telegram 資料」
+2. 只勾選需要的群組類型（私人群組／公開群組），格式選 **JSON**，媒體檔可全部取消勾選
+3. 將匯出資料夾放到 `data/telegram/`（已排除於版控），列出成員 id 以填寫 `employees.txt`：
+   ```bash
+   python -X utf8 -m src.telegram_export data/telegram
+   ```
+   `employees.txt` 可填顯示名稱，或 Telegram id（如 `user123456789`，改名也不受影響）
+4. 執行 triage：
+   ```bash
+   python -X utf8 main.py --telegram-export data/telegram --report
+   ```
+
+只處理群組；私訊、頻道、Bot 對話與收藏訊息會自動略過。
+
 ### 接收 LINE 即時訊息（webhook）
 
 LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍需用匯出 `.txt`。
@@ -159,7 +175,8 @@ line_chat/
 │   ├── report_writer.py      # PDF 報告產生（reportlab）
 │   ├── line_webhook.py       # LINE webhook 接收（FastAPI、簽章驗證、名稱查詢）
 │   ├── line_adapter.py       # webhook 事件 → 資料列
-│   └── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
+│   ├── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
+│   └── telegram_export.py    # Telegram Desktop JSON 匯出解析
 ├── tools/
 │   └── replay_export.py      # 將匯出檔重播為 webhook 事件（本機演練用）
 ├── tests/                    # pytest

@@ -2,7 +2,8 @@
 LINE 群組健康度 Triage 系統
 
 Usage:
-    python main.py [--conversations data/conversations | --line-db data/line.db]
+    python main.py [--conversations data/conversations | --line-db data/line.db
+                    | --telegram-export data/telegram]
                    [--employees data/employees.txt]
                    [--now YYYY-MM-DDTHH:MM] [--llm] [--llm-threshold 0.3]
                    [--report] [--report-dir reports]
@@ -68,6 +69,8 @@ def main():
     parser.add_argument("--conversations", default="data/conversations", help="對話檔資料夾")
     parser.add_argument("--line-db", default=None,
                         help="改從 LINE webhook 收集的 SQLite 讀取（指定時忽略 --conversations）")
+    parser.add_argument("--telegram-export", default=None,
+                        help="改從 Telegram Desktop 匯出的 result.json（或含多個匯出的資料夾）讀取")
     parser.add_argument("--employees", default="data/employees.txt", help="員工清單")
     parser.add_argument("--now", default=None, help="模擬當前時間 (YYYY-MM-DDTHH:MM)")
     parser.add_argument("--llm", action="store_true", help="啟用 Phase 2 LLM 議題抽取")
@@ -80,9 +83,15 @@ def main():
     now = datetime.fromisoformat(args.now) if args.now else datetime.now()
     employees = load_employees(args.employees)
 
-    sources = _line_db_sources(args.line_db, employees) if args.line_db         else _file_sources(args.conversations, employees)
+    source_path = args.line_db or args.telegram_export or args.conversations
+    if args.line_db:
+        sources = _line_db_sources(args.line_db, employees)
+    elif args.telegram_export:
+        sources = _telegram_sources(args.telegram_export, employees)
+    else:
+        sources = _file_sources(args.conversations, employees)
     if not sources:
-        print(f"找不到任何群組資料於 {args.line_db or args.conversations}", file=sys.stderr)
+        print(f"找不到任何群組資料於 {source_path}", file=sys.stderr)
         sys.exit(1)
 
     all_metrics = []
@@ -126,6 +135,17 @@ def _line_db_sources(db_path: str, employees: set[str]):
     return [
         (name or group_id, lambda g=group_id: store.load_group(g, employees))
         for group_id, name in store.list_groups()
+    ]
+
+
+def _telegram_sources(path: str, employees: set[str]):
+    """[(display_name, loader)] for group chats in Telegram Desktop JSON exports."""
+    from src.telegram_export import find_exports, load_export, parse_chat
+
+    return [
+        (chat.get("name") or str(chat.get("id")), lambda c=chat: parse_chat(c, employees))
+        for export in find_exports(path)
+        for chat in load_export(str(export))
     ]
 
 
