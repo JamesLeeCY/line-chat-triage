@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>多空標註</title>
+<style>
+/* Layout: one centered work column — progress strip, context, the message, then two key-mapped button rows. */
+:root {
+  --bg: #f3f5f4;
+  --surface: #ffffff;
+  --ink: #17201c;
+  --muted: #5e6b65;
+  --line: #d9e0dc;
+  --bull: #c0392b;      /* 台股慣例：紅漲 */
+  --bull-soft: #fbe9e7;
+  --bear: #1e8449;      /* 綠跌 */
+  --bear-soft: #e5f4ea;
+  --neutral: #55606a;
+  --neutral-soft: #eceff1;
+  --pick: #17201c;
+  --font: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121614; --surface: #1a201d; --ink: #e3e9e6; --muted: #93a19a; --line: #2c3530;
+    --bull: #ff7b6b; --bull-soft: #3a1f1c; --bear: #5fd08a; --bear-soft: #17301f;
+    --neutral: #aab4bd; --neutral-soft: #262c30; --pick: #e3e9e6;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.6; }
+main { max-width: 760px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 18px; }
+.top { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.top h1 { font-size: 18px; margin: 0; }
+.top .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; }
+.top .dist { margin-left: auto; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--ink); width: 0; transition: width .2s; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; display: grid; gap: 12px; min-width: 0; }
+.meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.ctx { font-size: 13px; color: var(--muted); display: grid; gap: 4px; border-left: 2px solid var(--line); padding-left: 10px; }
+.ctx .label { font-size: 11px; letter-spacing: .06em; }
+.ctx p, .reply p { margin: 0; overflow-wrap: anywhere; }
+.reply { font-size: 13px; color: var(--muted); background: var(--neutral-soft); border-radius: 6px; padding: 8px 10px; }
+.msg { font-size: 22px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.state { font-size: 13px; color: var(--muted); min-height: 1.4em; }
+.state.saved { color: var(--ink); }
+.row { display: grid; gap: 8px; }
+.row h2 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 0; font-weight: 500; }
+.keys { display: flex; flex-wrap: wrap; gap: 8px; }
+button.k { font: inherit; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button.k kbd { font-family: var(--mono); font-size: 12px; min-width: 1.6em; text-align: center; padding: 0 4px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+button.k[aria-pressed="true"] { border-color: var(--pick); box-shadow: inset 0 0 0 1px var(--pick); }
+button.k.bullish[aria-pressed="true"] { background: var(--bull-soft); border-color: var(--bull); box-shadow: inset 0 0 0 1px var(--bull); color: var(--bull); }
+button.k.bearish[aria-pressed="true"] { background: var(--bear-soft); border-color: var(--bear); box-shadow: inset 0 0 0 1px var(--bear); color: var(--bear); }
+button.k.neutral[aria-pressed="true"] { background: var(--neutral-soft); border-color: var(--neutral); box-shadow: inset 0 0 0 1px var(--neutral); }
+button.k:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.nav { display: flex; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); align-items: center; }
+.nav button.k { font-size: 13px; padding: 5px 10px; }
+.help { font-size: 13px; color: var(--muted); }
+.help summary { cursor: pointer; }
+.help dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; }
+.help dt { font-weight: 500; color: var(--ink); }
+.help dd { margin: 0; }
+.done { text-align: center; padding: 32px; }
+@media (prefers-reduced-motion: reduce) { .bar i { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>多空標註</h1>
+    <span class="count" id="count">載入中…</span>
+    <span class="dist" id="dist"></span>
+  </div>
+  <div class="bar"><i id="progress"></i></div>
+
+  <section class="card" id="card" aria-live="polite">
+    <div class="meta"><span id="pos"></span><span id="group"></span><span id="time"></span></div>
+    <div class="ctx" id="ctx" hidden><span class="label">前文</span></div>
+    <div class="reply" id="reply" hidden></div>
+    <p class="msg" id="msg"></p>
+    <div class="state" id="state"></div>
+  </section>
+
+  <div class="row">
+    <h2>多空立場</h2>
+    <div class="keys" id="stances"></div>
+  </div>
+  <div class="row">
+    <h2>主題</h2>
+    <div class="keys" id="topics"></div>
+  </div>
+
+  <div class="nav">
+    <button type="button" class="k" id="prev"><kbd>←</kbd>上一則</button>
+    <button type="button" class="k" id="next"><kbd>→</kbd>下一則</button>
+    <button type="button" class="k" id="unsure"><kbd>X</kbd>不確定，跳過</button>
+    <button type="button" class="k" id="jump"><kbd>N</kbd>跳到下一則未標</button>
+  </div>
+
+  <details class="help">
+    <summary>標註準則</summary>
+    <dl>
+      <dt>看多</dt><dd>看漲、買進或加碼、抱緊、期待上漲（噴、歐印、上車、多單）</dd>
+      <dt>看空</dt><dd>看跌、賣出或減碼、放空、擔心下跌、認賠（崩、套牢、停損、逃命）</dd>
+      <dt>中立</dt><dd>沒有方向性看法：提問、純資訊、閒聊、玩笑。拿不準方向時選中立</dd>
+      <dt>判斷對象</dt><dd>說話者對「後續行情方向」的看法，不是他的盈虧；反諷依實際意思判斷</dd>
+      <dt>主題</dt><dd>只選最主要的一個；與投資無關就選閒聊</dd>
+    </dl>
+  </details>
+</main>
+
+<script>
+(function () {
+  var STANCE_UI = [["bullish", "看多", "1"], ["bearish", "看空", "2"], ["neutral", "中立", "3"]];
+  var TOPIC_UI = [
+    ["individual_stock", "個股", "A"], ["market_index", "大盤指數", "S"], ["macro", "總經政策", "D"],
+    ["sector_theme", "產業題材", "F"], ["trading", "操作部位", "G"], ["news_info", "新聞資訊", "H"],
+    ["chit_chat", "閒聊", "J"]
+  ];
+  var items = [], labels = {}, idx = 0, draft = { stance: null, topic: null }, saving = false;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function buildKeys(container, defs, kind) {
+    defs.forEach(function (d) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "k " + d[0]; b.dataset.kind = kind; b.dataset.value = d[0];
+      b.setAttribute("aria-pressed", "false");
+      var k = document.createElement("kbd"); k.textContent = d[2];
+      b.appendChild(k); b.appendChild(document.createTextNode(d[1]));
+      b.addEventListener("click", function () { pick(kind, d[0]); });
+      container.appendChild(b);
+    });
+  }
+
+  function firstUnlabelled(from) {
+    for (var i = from; i < items.length; i++) if (!labels[items[i].id]) return i;
+    for (var j = 0; j < from; j++) if (!labels[items[j].id]) return j;
+    return -1;
+  }
+
+  function renderTop() {
+    var done = items.filter(function (it) { return labels[it.id]; }).length;
+    $("count").textContent = done + " / " + items.length + " 則已標";
+    $("progress").style.width = (items.length ? done / items.length * 100 : 0) + "%";
+    var c = { bullish: 0, bearish: 0, neutral: 0, unsure: 0 };
+    Object.keys(labels).forEach(function (k) { var l = labels[k]; c[l.unsure ? "unsure" : l.stance]++; });
+    $("dist").textContent = "看多 " + c.bullish + "・看空 " + c.bearish + "・中立 " + c.neutral + "・不確定 " + c.unsure;
+  }
+
+  function render() {
+    renderTop();
+    if (!items.length) return;
+    var it = items[idx], saved = labels[it.id];
+    $("pos").textContent = "#" + (idx + 1);
+    $("group").textContent = it.group;
+    $("time").textContent = it.time;
+    var ctx = $("ctx");
+    ctx.querySelectorAll("p").forEach(function (p) { p.remove(); });
+    (it.previous || []).forEach(function (t) { var p = document.createElement("p"); p.textContent = t; ctx.appendChild(p); });
+    ctx.hidden = !(it.previous && it.previous.length);
+    var reply = $("reply");
+    reply.textContent = "";
+    if (it.reply_to_text) {
+      var p = document.createElement("p"); p.textContent = "↪ 回覆：" + it.reply_to_text; reply.appendChild(p);
+    }
+    reply.hidden = !it.reply_to_text;
+    $("msg").textContent = it.text;
+    if (!draft.stance && !draft.topic && saved && !saved.unsure) draft = { stance: saved.stance, topic: saved.topic };
+    document.querySelectorAll("button.k[data-kind]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(draft[b.dataset.kind] === b.dataset.value));
+    });
+    var st = $("state");
+    st.className = "state" + (saved ? " saved" : "");
+    st.textContent = saved ? (saved.unsure ? "已標為不確定" : "已儲存，可直接改選覆蓋") : "選一個立場和一個主題，選完自動儲存";
+  }
+
+  function go(i) {
+    if (i < 0 || i >= items.length) return;
+    idx = i; draft = { stance: null, topic: null }; render();
+  }
+
+  function pick(kind, value) {
+    draft[kind] = value; render();
+    if (draft.stance && draft.topic) save({ stance: draft.stance, topic: draft.topic, unsure: false });
+  }
+
+  function save(body) {
+    if (saving) return;
+    saving = true;
+    var id = items[idx].id;
+    body.id = id;
+    fetch("/api/labels", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function () {
+        labels[id] = body; saving = false;
+        var next = firstUnlabelled(idx + 1);
+        setTimeout(function () { next === -1 ? finish() : go(next); }, 120);
+      })
+      .catch(function (e) {
+        saving = false;
+        var st = $("state"); st.className = "state"; st.textContent = "儲存失敗（" + e.message + "），請確認標註伺服器還在執行，再選一次";
+      });
+  }
+
+  function finish() {
+    renderTop();
+    var st = $("state"); st.className = "state saved";
+    st.textContent = "全部標完了，可以關閉這個頁面。按 ← 可以回頭修改。";
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var key = e.key.toUpperCase();
+    var s = STANCE_UI.find(function (d) { return d[2] === key; });
+    var t = TOPIC_UI.find(function (d) { return d[2] === key; });
+    if (s) { pick("stance", s[0]); e.preventDefault(); }
+    else if (t) { pick("topic", t[0]); e.preventDefault(); }
+    else if (e.key === "ArrowLeft") { go(idx - 1); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { go(idx + 1); e.preventDefault(); }
+    else if (key === "X") { save({ unsure: true }); e.preventDefault(); }
+    else if (key === "N") { var n = firstUnlabelled(idx + 1); if (n !== -1) go(n); e.preventDefault(); }
+  });
+  $("prev").addEventListener("click", function () { go(idx - 1); });
+  $("next").addEventListener("click", function () { go(idx + 1); });
+  $("unsure").addEventListener("click", function () { save({ unsure: true }); });
+  $("jump").addEventListener("click", function () { var n = firstUnlabelled(idx + 1); if (n !== -1) go(n); });
+
+  buildKeys($("stances"), STANCE_UI, "stance");
+  buildKeys($("topics"), TOPIC_UI, "topic");
+
+  fetch("/api/items").then(function (r) { return r.json(); }).then(function (data) {
+    items = data.items; labels = data.labels || {};
+    var first = firstUnlabelled(0);
+    if (first === -1) { idx = 0; render(); finish(); } else go(first);
+  }).catch(function () { $("count").textContent = "載入失敗，請確認標註伺服器正在執行"; });
+})();
+</script>
+</body>
+</html>

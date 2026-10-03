@@ -13,6 +13,7 @@ build/
 data/*.db
 data/*.db-journal
 data/telegram/
+data/community/
 
 # Reports (generated at runtime)
 reports/

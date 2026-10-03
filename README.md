@@ -118,6 +118,23 @@ python -m pytest
 
 只處理群組；私訊、頻道、Bot 對話與收藏訊息會自動略過。
 
+### 社群模式（股票社群群組：多空、話題、entropy）
+
+客服 triage 以外的第二種模式，針對大型投資社群群組。流程與資料都在 `data/community/`（已排除於版控）。
+
+```bash
+python -X utf8 -m src.community prepare        # Telegram 匯出 → SQLite（只需一次）
+python -X utf8 -m src.community sample         # 分層抽樣 3,000 則，500 則保留為考卷
+python -X utf8 -m src.community label --limit 20             # 地端 Qwen3 標註（Ollama，可中斷續跑）
+python -X utf8 -m src.community label --backend claude       # 或改用 Claude Haiku（需 ANTHROPIC_API_KEY）
+python -X utf8 -m src.community annotate       # 本機人工標註網頁 http://127.0.0.1:8770
+python -X utf8 -m src.community compare        # 各模型標註 vs 人工標註（accuracy / macro-F1 / kappa）
+python -X utf8 -m src.community train --labels qwen3-8b --test-labels human --show-features
+```
+
+標註來源存成 `data/community/labels/<名稱>.jsonl`：模型以模型名命名（如 `qwen3-8b`），人工標註為 `human`。
+分類器（`src/community/classifier.py`）介面為 `fit` / `predict_proba`，可替換為其他模型（如 Jev）在同一份考卷上比較。
+
 ### 接收 LINE 即時訊息（webhook）
 
 LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍需用匯出 `.txt`。
@@ -176,7 +193,8 @@ line_chat/
 │   ├── line_webhook.py       # LINE webhook 接收（FastAPI、簽章驗證、名稱查詢）
 │   ├── line_adapter.py       # webhook 事件 → 資料列
 │   ├── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
-│   └── telegram_export.py    # Telegram Desktop JSON 匯出解析
+│   ├── telegram_export.py    # Telegram Desktop JSON 匯出解析
+│   └── community/            # 社群模式：SQLite 儲存、抽樣、標註器、人工標註網頁、分類器、評估
 ├── tools/
 │   └── replay_export.py      # 將匯出檔重播為 webhook 事件（本機演練用）
 ├── tests/                    # pytest
