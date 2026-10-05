@@ -53,36 +53,66 @@ def cmd_groups(args):
 
 
 def cmd_sample(args):
-    from .gold import sample_gold
+    from collections import Counter
+
+    from .gold import _eligible_directional, read_jsonl, sample_gold
     from .store import CommunityStore
     store = CommunityStore(args.db)
     groups = store.groups()
+    n = args.n or (1000 if args.enrich else 3000)
+    test = args.test if args.test is not None else (200 if args.enrich else 500)
     if args.per_group:
         per_group = {int(k): int(v) for k, v in (p.split("=") for p in args.per_group.split(","))}
     else:  # equal share per group, so a small group isn't drowned by a big one
-        per_group = {gid: args.n // len(groups) for gid, *_ in groups}
-    records = sample_gold(store, per_group, test_size=args.test, seed=args.seed)
-    Path(args.out).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
-    n_test = sum(r["split"] == "test" for r in records)
-    print(f"[sample] {len(records)} 則 → {args.out}（train {len(records) - n_test} / test {n_test}）")
-    for gid, n in per_group.items():
-        print(f"         group {gid}: {sum(r['group_id'] == gid for r in records)} / {n}")
+        per_group = {gid: n // len(groups) for gid, *_ in groups}
+
+    if args.enrich:
+        # Append a directional-prior round to the existing sample; the random
+        # sample and its labels stay untouched
+        existing = read_jsonl(args.out)
+        if not existing:
+            sys.exit(f"{args.out} 不存在，請先執行一般的 sample")
+        if any(r["split"].startswith("enrich") for r in existing):
+            sys.exit("加強抽樣已經做過了；要重抽請先手動移除 enrich_* 的資料")
+        records = sample_gold(store, per_group, test_size=test, seed=args.seed + 1,
+                              eligible=_eligible_directional, exclude=frozenset(r["id"] for r in existing),
+                              splits=("enrich_test", "enrich_train"))
+        with open(args.out, "a", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+    else:
+        records = sample_gold(store, per_group, test_size=test, seed=args.seed)
+        Path(args.out).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
+
+    print(f"[sample] {len(records)} 則 → {args.out}  {dict(Counter(r['split'] for r in records))}")
+    for gid, quota in per_group.items():
+        print(f"         group {gid}: {sum(r['group_id'] == gid for r in records)} / {quota}")
 
 
 def cmd_label(args):
     from .gold import label_gold, read_jsonl
     from .labelers import make_labeler
 
-    labeler = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url)
+    labeler = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url,
+                           prompt=args.prompt)
     local = args.backend == "ollama"
     batch_size = args.batch_size or (10 if local else 25)
     workers = args.workers or (1 if local else 4)  # a CPU-bound Ollama gains nothing from parallel calls
     out = _labels_path(args.labels or labeler.name)
-    ids = None if args.split == "all" else {r["id"] for r in read_jsonl(args.sample) if r["split"] == args.split}
-    print(f"[label] {args.backend}:{labeler.model} → {out}（每批 {batch_size} 則，{workers} 個併發）")
-    stats = label_gold(args.sample, out, labeler=labeler, batch_size=batch_size, workers=workers,
-                       limit=args.limit, ids=ids)
-    print(f"[label] {stats}")
+    samples = read_jsonl(args.sample)
+    # Splits run in the order given, so e.g. "test,enrich_test,enrich_train" finishes the
+    # small held-out sets first and they can be compared while training labels continue
+    splits = sorted({r["split"] for r in samples}) if args.split == "all" else args.split.split(",")
+    print(f"[label] {args.backend}:{labeler.model} prompt {args.prompt} → {out}"
+          f"（每批 {batch_size} 則，{workers} 個併發）")
+    for split in splits:
+        ids = {r["id"] for r in samples if r["split"] == split}
+        if not ids:
+            print(f"[label] {split}: 抽樣檔裡沒有這個 split，略過", file=sys.stderr)
+            continue
+        print(f"[label] ---- {split}（{len(ids)} 則）", file=sys.stderr)
+        stats = label_gold(args.sample, out, labeler=labeler, batch_size=batch_size, workers=workers,
+                           limit=args.limit, ids=ids)
+        print(f"[label] {split}: {stats}")
 
 
 def cmd_annotate(args):
@@ -96,18 +126,30 @@ def cmd_annotate(args):
 
 def cmd_compare(args):
     from .compare import agreement, format_agreement, usable
+    from .gold import read_jsonl
 
     ref_path = _labels_path(args.reference)
     reference = usable(ref_path)
     if not reference:
         sys.exit(f"參考標註 {ref_path} 是空的；先用 annotate 標一些")
-    candidates = args.candidates.split(",") if args.candidates else         [s for s in _available_sources() if s != args.reference]
-    for name in candidates:
-        cand = usable(_labels_path(name))
-        for field in ("stance", "topic"):
-            r = agreement(reference, cand, field)
-            print(format_agreement(f"{name} vs {args.reference}", field, r) if r
-                  else f"== {name}: 與 {args.reference} 沒有共同標註的訊息")
+    if args.candidates:
+        candidates = args.candidates.split(",")
+    else:
+        candidates = [s for s in _available_sources() if s != args.reference]
+    by_split: dict[str, set] = {}
+    for r in read_jsonl(args.sample):
+        by_split.setdefault(r["split"], set()).add(r["id"])
+
+    # Random test = realistic mix; enrich_test = mostly directional messages,
+    # where bull/bear errors actually show up. Reported separately, never pooled.
+    for split in ("test", "enrich_test"):
+        ids = by_split.get(split, set())
+        for name in candidates:
+            cand = usable(_labels_path(name))
+            for field in ("stance", "topic"):
+                r = agreement(reference, cand, field, ids=ids)
+                if r:
+                    print(format_agreement(f"[{split}] {name} vs {args.reference}", field, r))
 
 
 def cmd_train(args):
@@ -118,28 +160,39 @@ def cmd_train(args):
     from .gold import load_gold
 
     from .compare import usable
+    from .gold import read_jsonl
 
     if not args.labels:
         sys.exit(f"請用 --labels 指定訓練用的標註來源，目前有：{', '.join(_available_sources()) or '（無）'}")
-    train = [g for g in load_gold(args.sample, _labels_path(args.labels)) if g["split"] == "train"]
-    test_labels = usable(_labels_path(args.test_labels or args.labels))
-    test = [{**s, **test_labels[s["id"]]} for s in load_gold(args.sample, _labels_path(args.test_labels or args.labels))
-            if s["split"] == "test" and s["id"] in test_labels]
-    if not train or not test:
-        sys.exit(f"標註資料不足：train {len(train)} / test {len(test)}，請先執行 label / annotate")
-    print(f"[train] 訓練：{args.labels}（{len(train)} 則）｜考卷：{args.test_labels or args.labels}（{len(test)} 則）")
+    # Train on the random train split plus the enrichment round, so the classifier
+    # sees enough bull / bear examples; test splits are never trained on
+    train = [g for g in load_gold(args.sample, _labels_path(args.labels)) if g["split"] in ("train", "enrich_train")]
+    test_source = args.test_labels or args.labels
+    test_labels = usable(_labels_path(test_source))
+    samples = read_jsonl(args.sample)
+    tests = {
+        split: [{**s, **test_labels[s["id"]]} for s in samples if s["split"] == split and s["id"] in test_labels]
+        for split in ("test", "enrich_test")
+    }
+    tests = {k: v for k, v in tests.items() if v}
+    if not train or not tests:
+        sys.exit(f"標註資料不足：train {len(train)} / 考卷 {sum(map(len, tests.values()))}，請先執行 label / annotate")
+    print(f"[train] 訓練：{args.labels}（{len(train)} 則）｜考卷：{test_source}"
+          f"（{'、'.join(f'{k} {len(v)} 則' for k, v in tests.items())}）")
 
     report = {}
     for target in args.targets.split(","):
         print(f"\n######## {target}  分布（train）: {dict(Counter(g[target] for g in train))}")
         X_tr, y_tr = [g["text"] for g in train], [g[target] for g in train]
-        X_te, y_te = [g["text"] for g in test], [g[target] for g in test]
         report[target] = {}
         for name, model in [("majority", MajorityClass()), ("tfidf_logreg", TfidfLogReg())]:
             model.fit(X_tr, y_tr)
-            result = evaluate(model.classes_, model.predict_proba(X_te), y_te)
-            report[target][name] = result
-            print(format_report(f"{target} / {name}", result))
+            report[target][name] = {}
+            for split, test in tests.items():
+                X_te, y_te = [g["text"] for g in test], [g[target] for g in test]
+                result = evaluate(model.classes_, model.predict_proba(X_te), y_te)
+                report[target][name][split] = result
+                print(format_report(f"[{split}] {target} / {name}", result))
             if name == "tfidf_logreg" and args.show_features:
                 for cls, feats in model.top_features(12).items():
                     print(f"   top[{cls}]: {' · '.join(feats)}")
@@ -168,9 +221,11 @@ def main(argv=None):
 
     p = sub.add_parser("sample", help="分層抽樣標準答案")
     p.add_argument("--db", default=DB)
-    p.add_argument("--n", type=int, default=3000, help="總抽樣數（預設各群組平分）")
+    p.add_argument("--enrich", action="store_true",
+                   help="加強抽樣：只挑可能有多空看法的訊息，附加到現有抽樣檔（enrich_train / enrich_test）")
+    p.add_argument("--n", type=int, default=None, help="總抽樣數，預設 3000（--enrich 時 1000），各群組平分")
     p.add_argument("--per-group", default=None, help="自訂各群組數量，如 3366841830=2000,123=1000")
-    p.add_argument("--test", type=int, default=500, help="保留作考卷的數量")
+    p.add_argument("--test", type=int, default=None, help="保留作考卷的數量，預設 500（--enrich 時 200）")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", default=SAMPLE)
     p.set_defaults(func=cmd_sample)
@@ -183,8 +238,10 @@ def main(argv=None):
                    help="只適用 Claude Opus / Sonnet；Haiku 與 Ollama 不支援")
     p.add_argument("--ollama-url", default="http://localhost:11434")
     p.add_argument("--sample", default=SAMPLE)
-    p.add_argument("--labels", default=None, help="輸出的標註來源名稱（預設用模型名）")
-    p.add_argument("--split", default="all", choices=["all", "train", "test"])
+    p.add_argument("--prompt", default="v2", choices=["v1", "v2"], help="提示詞版本（v1 結果存在不帶版本的檔名）")
+    p.add_argument("--labels", default=None, help="輸出的標註來源名稱（預設用模型名＋提示詞版本）")
+    p.add_argument("--split", default="all",
+                   help="all，或依序執行的 split 清單，如 test,enrich_test,enrich_train")
     p.add_argument("--batch-size", type=int, default=None, help="預設 ollama 10、claude 25")
     p.add_argument("--workers", type=int, default=None, help="預設 ollama 1、claude 4")
     p.add_argument("--limit", type=int, default=None, help="只標註前 N 則（先小量試跑）")
@@ -192,12 +249,13 @@ def main(argv=None):
 
     p = sub.add_parser("annotate", help="開啟人工標註網頁（本機）")
     p.add_argument("--sample", default=SAMPLE)
-    p.add_argument("--split", default="test", choices=["test", "train", "all"])
+    p.add_argument("--split", default="test", choices=["test", "enrich_test", "train", "enrich_train", "all"])
     p.add_argument("--limit", type=int, default=300)
     p.add_argument("--port", type=int, default=8770)
     p.set_defaults(func=cmd_annotate)
 
     p = sub.add_parser("compare", help="比較各標註來源與參考標註（預設人工）的一致性")
+    p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--reference", default="human")
     p.add_argument("--candidates", default=None, help="逗號分隔；預設 labels/ 下所有其他來源")
     p.set_defaults(func=cmd_compare)

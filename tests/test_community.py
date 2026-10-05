@@ -272,7 +272,10 @@ def test_make_labeler_think_flag_by_model():
     assert make_labeler("ollama").think is False                      # qwen3 default: thinking off
     assert make_labeler("ollama", "qwen2.5:7b-instruct").think is None  # no thinking mode: don't send
     assert "think" not in make_labeler("ollama", "qwen2.5:7b-instruct")._payload([{"id": "a", "text": "x"}])
-    assert make_labeler("ollama").name == "qwen3-8b"
+    assert make_labeler("ollama").name == "qwen3-8b-v2"            # default prompt v2
+    assert make_labeler("ollama", prompt="v1").name == "qwen3-8b"  # v1 keeps the original file name
+    with pytest.raises(ValueError):
+        make_labeler("ollama", prompt="v9")
     with pytest.raises(ValueError):
         make_labeler("openai")
 
@@ -328,3 +331,53 @@ def test_compare_agreement_skips_unsure(tmp_path):
     assert r["confusion"]["labels"] == ["bearish", "bullish", "neutral"]
     assert r["confusion"]["matrix"] == [[0, 0, 1], [0, 1, 0], [0, 0, 1]]
     assert agreement(usable(str(human)), {}, "stance") is None
+
+
+# --- prompt versions & enrichment ---
+
+def test_prompt_versions_reach_the_model(monkeypatch):
+    from src.community.gold import PROMPTS
+
+    sent = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: (
+        sent.append(json.loads(req.data)) or _FakeResponse({"message": {"content": LabelBatch(labels=[]).model_dump_json()}})))
+    OllamaLabeler(prompt="v1").label([{"id": "a", "text": "x"}])
+    OllamaLabeler(prompt="v2").label([{"id": "a", "text": "x"}])
+    assert sent[0]["messages"][0]["content"] == PROMPTS["v1"]
+    assert sent[1]["messages"][0]["content"] == PROMPTS["v2"]
+    assert "情緒本身不是多空" in PROMPTS["v2"] and "情緒本身不是多空" not in PROMPTS["v1"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("台積電要噴了", True), ("買到2330", True), ("00878 配息", True), ("好爽買SOXL", True),
+    ("NVDA 財報", True), ("ALL IN", True), ("繼續殺", True),
+    ("2026年快樂", False), ("今天吃什麼", False), ("ok 好", False), ("iPhone 好用", False),
+    ("1234567 電話", False), ("我包紅包給我媽", False),
+])
+def test_directional_prior(text, expected):
+    from src.community.gold import is_directional_candidate
+    assert is_directional_candidate(text) is expected
+
+
+def test_enriched_sample_excludes_existing_and_uses_its_own_splits(tmp_path):
+    from src.community.gold import _eligible_directional
+
+    s = CommunityStore(str(tmp_path / "c.db"))
+    msgs = []
+    for d in range(14):
+        ts = START + timedelta(days=d)
+        msgs += [_raw(d * 10 + 1, ts, text=f"第{d}天 早安"),
+                 _raw(d * 10 + 2, ts + timedelta(minutes=1), text=f"第{d}天 2330 要噴"),
+                 _raw(d * 10 + 3, ts + timedelta(minutes=2), text=f"第{d}天 停損出場")]
+    s.import_chat({"id": 1, "name": "g", "type": "private_supergroup", "messages": msgs})
+
+    base = sample_gold(s, {1: 10}, test_size=3, seed=1)
+    taken = frozenset(r["id"] for r in base)
+    enriched = sample_gold(s, {1: 100}, test_size=5, seed=2, eligible=_eligible_directional,
+                           exclude=taken, splits=("enrich_test", "enrich_train"))
+
+    assert not taken & {r["id"] for r in enriched}
+    assert all("早安" not in r["text"] for r in enriched)
+    assert len(enriched) == 28 - len([r for r in base if "早安" not in r["text"]])
+    assert Counter(r["split"] for r in enriched)["enrich_test"] == 5
+    assert {r["split"] for r in enriched} == {"enrich_test", "enrich_train"}

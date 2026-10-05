@@ -35,6 +35,16 @@ TOPICS = ("individual_stock", "market_index", "macro", "sector_theme", "trading"
 _URL_ONLY = re.compile(r"^\s*https?://\S+\s*$")
 _MAX_TEXT = 500
 
+# Enrichment prior: messages likely to carry a bull/bear view. Deliberately loose
+# (it only decides what humans and the labeller look at, never the label itself):
+# directional slang, position words, Taiwan tickers / ETFs, upper-case US tickers.
+DIRECTIONAL = re.compile(
+    r"噴|漲|跌|崩|殺|多單|空單|做多|做空|放空|加碼|減碼|上車|下車|歐印|(?i:all\s*in)|抱緊|抄底|停損|停利|認賠|套牢|"
+    r"進場|出場|逃命|漲停|跌停|創高|破底|回檔|反彈|韭菜|GG|看多|看空|買進|賣出|"
+    r"(?<!\d)(?:[1-9]\d{3}|00\d{2,3})(?!\d)|(?<![A-Za-z])\$?[A-Z]{2,5}(?![A-Za-z])",
+)
+_NOT_TICKER_YEAR = re.compile(r"(?<!\d)20[2-3]\d(?!\d)")
+
 
 # --- sampling ---
 
@@ -48,6 +58,15 @@ def _eligible(msg: CommunityMessage) -> bool:
     return len(text) >= 2 and not _URL_ONLY.match(text)
 
 
+def is_directional_candidate(text: str) -> bool:
+    """Loose prior for enrichment; years like 2026 are not tickers."""
+    return bool(DIRECTIONAL.search(_NOT_TICKER_YEAR.sub(" ", text)))
+
+
+def _eligible_directional(msg: CommunityMessage) -> bool:
+    return _eligible(msg) and is_directional_candidate(msg.text)
+
+
 def _context(store: CommunityStore, msg: CommunityMessage) -> dict:
     reply = store.get(msg.group_id, msg.reply_to) if msg.reply_to else None
     return {
@@ -58,6 +77,7 @@ def _context(store: CommunityStore, msg: CommunityMessage) -> dict:
 
 def sample_gold(
     store: CommunityStore, per_group: dict[int, int], test_size: int, seed: int = 42,
+    eligible=_eligible, exclude: frozenset = frozenset(), splits: tuple[str, str] = ("test", "train"),
 ) -> list[dict]:
     """
     Draw `per_group[group_id]` messages from each group, spread evenly across
@@ -65,6 +85,10 @@ def sample_gold(
     Weeks rather than months, so a group's partial first / last month doesn't
     get a full month's share.
     Exact duplicate texts are drawn once, so 「噴」×5000 doesn't eat the budget.
+
+    `eligible` filters candidates (e.g. the directional prior for enrichment),
+    `exclude` holds ids already sampled, and `splits` names the (held-out, rest)
+    split labels — ("enrich_test", "enrich_train") for an enrichment round.
     """
     rng = random.Random(seed)
     names = {gid: name for gid, name, *_ in store.groups()}
@@ -74,7 +98,7 @@ def sample_gold(
         by_week: dict[str, list[CommunityMessage]] = defaultdict(list)
         for chunk in store.iter_messages(group_id, kind="text"):
             for msg in chunk:
-                if _eligible(msg):
+                if eligible(msg) and f"{msg.group_id}:{msg.msg_id}" not in exclude:
                     by_week[_week(msg.ts)].append(msg)
 
         picked, seen = [], set()
@@ -108,7 +132,7 @@ def sample_gold(
 
     rng.shuffle(records)
     for i, r in enumerate(records):
-        r["split"] = "test" if i < test_size else "train"
+        r["split"] = splits[0] if i < test_size else splits[1]
     return records
 
 
@@ -147,6 +171,37 @@ topic（主題，只選最主要的一個）
 tickers：訊息提到的標的，台股用代號或常用名稱（2330、台積電、0050），美股用代號（NVDA、TSLA），指數用常用名稱（加權指數、台指期、那斯達克）。沒有就給空陣列。
 
 每則輸入訊息都必須回傳一筆標註，id 原樣照抄。"""
+
+
+SYSTEM_PROMPT_V2 = """你是台灣股票社群（Telegram 群組）的訊息標註員。每則訊息請標註三件事，只根據「目標訊息」本身判斷；前文與被回覆的訊息只用來理解語意（例如「我也是」「+1」要看它附和的是什麼）。
+
+stance（多空立場）
+- bullish：對某個標的或整體市場「後續」看漲，或表示正在買進、加碼、續抱（例：噴、歐印、all in、抱緊、上車、多單、明天漲停）
+- bearish：對某個標的或整體市場「後續」看跌，或表示正在賣出、減碼、放空、停損（例：崩、要跌了、空單、停損、逃命、還不是底）
+- neutral：其他所有情況，包括：
+  - 提問、純資訊、轉貼新聞、閒聊、表情、玩笑
+  - 只陳述已經發生的漲跌，沒有對後續的看法（「SNDK -7%」「今天又跌停」）
+  - 政治、社會議題、八卦、時事評論，即使語氣很激動
+  - 罵髒話、抱怨、開心、興奮等情緒，但沒有提到行情、價格或部位
+- 關鍵規則：必須和行情、價格或持股部位有關，才可能是 bullish / bearish。情緒本身不是多空：生氣不等於看空，興奮不等於看多。
+- 判斷的是說話者對後續行情方向的看法，不是他的部位盈虧。反諷依實際意思判斷（「好棒喔又跌停，明天繼續跌吧」→ bearish）。拿不準時標 neutral。
+
+topic（主題，只選最主要的一個）
+- individual_stock：特定個股或 ETF
+- market_index：大盤、加權指數、台指期、那斯達克、S&P 500 等整體市場
+- macro：總經、利率、Fed、匯率、通膨，以及「對市場有影響」的政策與地緣政治
+- sector_theme：產業或題材（AI、半導體、航運、生技…）而非單一個股
+- trading：操作與部位：進出場、停損停利、選擇權、當沖、資金控管
+- news_info：轉貼新聞、財報、法說會、公告等資訊分享
+- chit_chat：與投資無關的閒聊、問候、玩笑；政治、社會議題與八卦若沒談到對市場的影響，也歸這裡
+
+tickers：訊息提到的標的，台股用代號或常用名稱（2330、台積電、0050），美股用代號（NVDA、TSLA），指數用常用名稱（加權指數、台指期、那斯達克）。沒有就給空陣列。
+
+每則輸入訊息都必須回傳一筆標註，id 原樣照抄。"""
+
+# Versioned so earlier label files stay reproducible; v2 adds "emotion is not
+# stance" after the v1 run mislabelled politics / profanity as bull / bear.
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2}
 
 
 def _format_batch(records: list[dict]) -> str:

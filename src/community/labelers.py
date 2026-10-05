@@ -13,11 +13,16 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from .gold import SYSTEM_PROMPT, LabelBatch, _format_batch
+from .gold import PROMPTS, LabelBatch, _format_batch
 
 
 def _slug(model: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", model).strip("-")
+
+
+def source_name(model: str, prompt: str) -> str:
+    """Label-file name; v1 keeps the bare model name so earlier files still match."""
+    return _slug(model) if prompt == "v1" else f"{_slug(model)}-{prompt}"
 
 
 def _keep_requested(labels: LabelBatch, records: list[dict]) -> list[dict]:
@@ -31,12 +36,13 @@ def _keep_requested(labels: LabelBatch, records: list[dict]) -> list[dict]:
 
 
 class ClaudeLabeler:
-    def __init__(self, model: str = "claude-haiku-4-5", effort: Optional[str] = None, client=None):
+    def __init__(self, model: str = "claude-haiku-4-5", effort: Optional[str] = None, client=None,
+                 prompt: str = "v2"):
         if client is None:
             import anthropic
             client = anthropic.Anthropic()
-        self.client, self.model, self.effort = client, model, effort
-        self.name = _slug(model)
+        self.client, self.model, self.effort, self.prompt = client, model, effort, prompt
+        self.name = source_name(model, prompt)
 
     def label(self, records: list[dict]) -> list[dict]:
         # Haiku 4.5 rejects `effort`; only send it when asked (Opus / Sonnet)
@@ -44,7 +50,7 @@ class ClaudeLabeler:
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
+            system=PROMPTS[self.prompt],
             messages=[{"role": "user", "content": _format_batch(records)}],
             output_format=LabelBatch,
             **extra,
@@ -62,9 +68,10 @@ class OllamaLabeler:
     """
 
     def __init__(self, model: str = "qwen3:8b", url: str = "http://localhost:11434",
-                 num_ctx: int = 8192, timeout: float = 3600, think: Optional[bool] = False):
+                 num_ctx: int = 8192, timeout: float = 3600, think: Optional[bool] = False, prompt: str = "v2"):
         self.model, self.url, self.num_ctx, self.timeout, self.think = model, url.rstrip("/"), num_ctx, timeout, think
-        self.name = _slug(model)
+        self.prompt = prompt
+        self.name = source_name(model, prompt)
 
     def _payload(self, records: list[dict]) -> dict:
         body = {
@@ -74,7 +81,7 @@ class OllamaLabeler:
             "format": LabelBatch.model_json_schema(),
             "options": {"temperature": 0, "num_ctx": self.num_ctx},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": PROMPTS[self.prompt]},
                 {"role": "user", "content": _format_batch(records)},
             ],
         }
@@ -99,11 +106,13 @@ class OllamaLabeler:
 
 
 def make_labeler(backend: str, model: Optional[str] = None, effort: Optional[str] = None,
-                 ollama_url: str = "http://localhost:11434"):
+                 ollama_url: str = "http://localhost:11434", prompt: str = "v2"):
+    if prompt not in PROMPTS:
+        raise ValueError(f"unknown prompt version: {prompt}")
     if backend == "claude":
-        return ClaudeLabeler(model or "claude-haiku-4-5", effort=effort)
+        return ClaudeLabeler(model or "claude-haiku-4-5", effort=effort, prompt=prompt)
     if backend == "ollama":
         model = model or "qwen3:8b"
         think = False if model.startswith(("qwen3", "deepseek-r1")) else None
-        return OllamaLabeler(model, url=ollama_url, think=think)
+        return OllamaLabeler(model, url=ollama_url, think=think, prompt=prompt)
     raise ValueError(f"unknown backend: {backend}")
