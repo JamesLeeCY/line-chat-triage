@@ -381,3 +381,39 @@ def test_enriched_sample_excludes_existing_and_uses_its_own_splits(tmp_path):
     assert len(enriched) == 28 - len([r for r in base if "早安" not in r["text"]])
     assert Counter(r["split"] for r in enriched)["enrich_test"] == 5
     assert {r["split"] for r in enriched} == {"enrich_test", "enrich_train"}
+
+
+# --- enrichment rounds via the CLI ---
+
+def test_split_helpers():
+    from src.community.__main__ import is_train_split, test_splits
+    assert [s for s in ("train", "enrich_train", "enrich2_train", "test", "enrich_test") if is_train_split(s)] == \
+        ["train", "enrich_train", "enrich2_train"]
+    rows = [{"split": s} for s in ("enrich_test", "train", "test", "enrich2_test", "enrich_train")]
+    assert test_splits(rows) == ["test", "enrich2_test", "enrich_test"]
+
+
+def test_enrich_rounds_cli(tmp_path, monkeypatch):
+    from src.community.__main__ import main
+
+    db, sample = str(tmp_path / "c.db"), str(tmp_path / "sample.jsonl")
+    s = CommunityStore(db)
+    msgs = []
+    for d in range(28):
+        ts = START + timedelta(days=d)
+        for k in range(6):
+            text = f"第{d}天{k} 早安" if k < 2 else f"第{d}天{k} 2330 要噴"
+            msgs.append(_raw(d * 10 + k, ts + timedelta(minutes=k), text=text))
+    s.import_chat({"id": 1, "name": "g", "type": "private_supergroup", "messages": msgs})
+
+    main(["sample", "--db", db, "--out", sample, "--n", "40", "--test", "10"])
+    main(["sample", "--db", db, "--out", sample, "--enrich", "--n", "30", "--test", "5"])
+    main(["sample", "--db", db, "--out", sample, "--enrich", "--round", "2", "--n", "20", "--test", "0"])
+    with pytest.raises(SystemExit):  # same round twice is refused
+        main(["sample", "--db", db, "--out", sample, "--enrich", "--round", "2", "--n", "20", "--test", "0"])
+
+    rows = read_jsonl(sample)
+    assert Counter(r["split"] for r in rows) == {"train": 30, "test": 10, "enrich_train": 25, "enrich_test": 5,
+                                                 "enrich2_train": 20}
+    assert len({r["id"] for r in rows}) == len(rows)
+    assert all("要噴" in r["text"] for r in rows if r["split"].startswith("enrich"))

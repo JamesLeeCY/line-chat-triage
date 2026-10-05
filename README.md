@@ -121,6 +121,7 @@ python -m pytest
 ### 社群模式（股票社群群組：多空、話題、entropy）
 
 客服 triage 以外的第二種模式，針對大型投資社群群組。流程與資料都在 `data/community/`（已排除於版控）。
+目前進度、實驗結果與下一步記錄在 [HANDOFF.md](HANDOFF.md)。
 
 ```bash
 python -X utf8 -m src.community prepare        # Telegram 匯出 → SQLite（只需一次）

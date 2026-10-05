@@ -30,6 +30,16 @@ def _labels_path(name_or_path: str) -> str:
     return str(p) if p.suffix == ".jsonl" or p.exists() else str(LABEL_DIR / f"{name_or_path}.jsonl")
 
 
+def is_train_split(split: str) -> bool:
+    return split == "train" or split.endswith("_train")
+
+
+def test_splits(samples: list[dict]) -> list[str]:
+    """Held-out splits, random test first: never trained on, always scored separately."""
+    found = {r["split"] for r in samples if r["split"] == "test" or r["split"].endswith("_test")}
+    return sorted(found, key=lambda s: (s != "test", s))
+
+
 def _available_sources() -> list[str]:
     return sorted(p.stem for p in LABEL_DIR.glob("*.jsonl"))
 
@@ -67,16 +77,19 @@ def cmd_sample(args):
         per_group = {gid: n // len(groups) for gid, *_ in groups}
 
     if args.enrich:
-        # Append a directional-prior round to the existing sample; the random
-        # sample and its labels stay untouched
+        # Append a directional-prior round to the existing sample; earlier rounds
+        # and their labels stay untouched. Round 1 is "enrich_*", later rounds
+        # "enrich<N>_*" (round 2+ usually skip a test split: enrich_test stays the
+        # fixed yardstick so scores remain comparable).
         existing = read_jsonl(args.out)
         if not existing:
             sys.exit(f"{args.out} 不存在，請先執行一般的 sample")
-        if any(r["split"].startswith("enrich") for r in existing):
-            sys.exit("加強抽樣已經做過了；要重抽請先手動移除 enrich_* 的資料")
-        records = sample_gold(store, per_group, test_size=test, seed=args.seed + 1,
+        prefix = "enrich" if args.round == 1 else f"enrich{args.round}"
+        if any(r["split"].startswith(prefix + "_") for r in existing):
+            sys.exit(f"第 {args.round} 輪加強抽樣已經做過了；要重抽請先手動移除 {prefix}_* 的資料")
+        records = sample_gold(store, per_group, test_size=test, seed=args.seed + args.round,
                               eligible=_eligible_directional, exclude=frozenset(r["id"] for r in existing),
-                              splits=("enrich_test", "enrich_train"))
+                              splits=(f"{prefix}_test", f"{prefix}_train"))
         with open(args.out, "a", encoding="utf-8") as f:
             f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
     else:
@@ -142,7 +155,7 @@ def cmd_compare(args):
 
     # Random test = realistic mix; enrich_test = mostly directional messages,
     # where bull/bear errors actually show up. Reported separately, never pooled.
-    for split in ("test", "enrich_test"):
+    for split in test_splits(read_jsonl(args.sample)):
         ids = by_split.get(split, set())
         for name in candidates:
             cand = usable(_labels_path(name))
@@ -164,15 +177,15 @@ def cmd_train(args):
 
     if not args.labels:
         sys.exit(f"請用 --labels 指定訓練用的標註來源，目前有：{', '.join(_available_sources()) or '（無）'}")
-    # Train on the random train split plus the enrichment round, so the classifier
+    # Train on the random train split plus every enrichment round, so the classifier
     # sees enough bull / bear examples; test splits are never trained on
-    train = [g for g in load_gold(args.sample, _labels_path(args.labels)) if g["split"] in ("train", "enrich_train")]
+    train = [g for g in load_gold(args.sample, _labels_path(args.labels)) if is_train_split(g["split"])]
     test_source = args.test_labels or args.labels
     test_labels = usable(_labels_path(test_source))
     samples = read_jsonl(args.sample)
     tests = {
         split: [{**s, **test_labels[s["id"]]} for s in samples if s["split"] == split and s["id"] in test_labels]
-        for split in ("test", "enrich_test")
+        for split in test_splits(samples)
     }
     tests = {k: v for k, v in tests.items() if v}
     if not train or not tests:
@@ -226,6 +239,7 @@ def main(argv=None):
     p.add_argument("--n", type=int, default=None, help="總抽樣數，預設 3000（--enrich 時 1000），各群組平分")
     p.add_argument("--per-group", default=None, help="自訂各群組數量，如 3366841830=2000,123=1000")
     p.add_argument("--test", type=int, default=None, help="保留作考卷的數量，預設 500（--enrich 時 200）")
+    p.add_argument("--round", type=int, default=1, help="加強抽樣第幾輪（2 起存成 enrich<N>_train / _test）")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", default=SAMPLE)
     p.set_defaults(func=cmd_sample)
@@ -249,7 +263,7 @@ def main(argv=None):
 
     p = sub.add_parser("annotate", help="開啟人工標註網頁（本機）")
     p.add_argument("--sample", default=SAMPLE)
-    p.add_argument("--split", default="test", choices=["test", "enrich_test", "train", "enrich_train", "all"])
+    p.add_argument("--split", default="test", help="要標的 split，如 test、enrich_test")
     p.add_argument("--limit", type=int, default=300)
     p.add_argument("--port", type=int, default=8770)
     p.set_defaults(func=cmd_annotate)
