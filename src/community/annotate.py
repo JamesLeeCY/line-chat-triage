@@ -34,10 +34,17 @@ def latest_labels(path: str) -> dict[str, dict]:
     return {r["id"]: r for r in read_jsonl(path)}
 
 
-def create_app(sample_path: str, labels_path: str, split: str = "test", limit: Optional[int] = 300) -> FastAPI:
-    items = [r for r in read_jsonl(sample_path) if split in (None, "all") or r["split"] == split]
-    if limit:
-        items = items[:limit]
+def create_app(sample_path: str, labels_path: str, split: str = "test", limit: Optional[int] = 300,
+               ids: Optional[list[str]] = None) -> FastAPI:
+    """`ids` (e.g. the review queue) fixes exactly which items appear and in what order."""
+    samples = read_jsonl(sample_path)
+    if ids is not None:
+        by_id = {r["id"]: r for r in samples}
+        items = [by_id[i] for i in ids if i in by_id]
+    else:
+        items = [r for r in samples if split in (None, "all") or r["split"] == split]
+        if limit:
+            items = items[:limit]
     allowed = {r["id"] for r in items}
     Path(labels_path).parent.mkdir(parents=True, exist_ok=True)
 

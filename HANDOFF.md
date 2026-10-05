@@ -72,7 +72,7 @@
 |------|---------|-----------------|------------------|-------------|---------------------|
 | `qwen3-8b`（提示詞 v1） | ✅ 500 | — | — | — | — |
 | `qwen3-8b-v2`（提示詞 v2） | ✅ 500 | ✅ 200 | ✅ 800 | — | — |
-| `human`（人工） | **14** | 0 | — | — | — |
+| `human`（人工） | **14**（待標清單剩 151 則，見第 5 節） | 0 | — | — | — |
 
 Qwen3 8B 在本機（i7-8700，GPU 僅 2 GB 實際用 CPU）約 **3 分鐘 / 10 則**；3,000 則約 15 小時。
 長時間標註請在自己的終端機執行（Claude 工作階段結束時，背景程式會一併中止；標註可續跑）。
@@ -119,21 +119,28 @@ Qwen3 8B 在本機（i7-8700，GPU 僅 2 GB 實際用 CPU）約 **3 分鐘 / 10 
 
 ## 5. 下一步（依優先順序）
 
-0. **待決定：改為「只標 AI 有爭議的訊息」**（2026-10-06 提出，尚未實作）
-   人工不必從頭標 500 則，改標約 100–150 則：v1 與 v2 判斷不同的訊息、Qwen3 判為有多空立場的訊息，再加少量隨機中立訊息作為對照（用來檢查漏標）。
-   兩個模型都判中立且明顯是閒聊的訊息（約九成）不需人工。需修改 `annotate` 的取樣方式，約 20 分鐘。
-   若採用，下方第 1 步改為標這份清單。
+1. **人工標註待標清單（最優先，唯一卡關點）— 剩 151 則**
 
-1. **人工標註（最優先，唯一卡關點）**
+   2026-10-06 改為「只標 AI 有爭議的訊息」，取代原本從頭標 500 則：
+
+   | 考卷 | AI 判多空（全收） | AI 判中立（對照組抽樣） |
+   |------|------------------|------------------------|
+   | `test` | 43（其中 v1 / v2 意見不一 15） | 59 / 457（含先前已標的 14 則） |
+   | `enrich_test` | 48 | 15 / 152 |
+
+   清單存於 `data/community/review_queue.jsonl`（共 165 則，順序已打亂，避免連續出現同類訊息暗示答案）。
    ```bash
-   python -X utf8 -m src.community annotate                                   # 隨機考卷，目標 300 則
-   python -X utf8 -m src.community annotate --split enrich_test --limit 200   # 加強考卷 200 則
+   python -X utf8 -m src.community annotate --queue
    ```
    開 http://127.0.0.1:8770，鍵盤操作（1/2/3 多空、A–J 主題、X 不確定）。標完執行：
    ```bash
    python -X utf8 -m src.community compare
    ```
    決定 v1 / v2 哪個較準，以及「已發生漲跌」的判準。
+
+   **加權**：清單刻意多收有立場的訊息，`compare` 與 `train --test-labels human` 會自動依 `review_queue.jsonl`
+   以分層權重（該層總數 ÷ 該層已標數）換算，輸出標示 `[weighted: full-split estimate]`，代表推估整份考卷的分數。
+   **清單一旦開始標註就不要重建**（`review-queue` 會拒絕覆蓋，除非加 `--force`），否則權重失效。
 
 2. **依人工結果調整提示詞 v3**（如有需要），新增於 `gold.PROMPTS`，舊版保留以便重現。
 
@@ -160,11 +167,12 @@ Qwen3 8B 在本機（i7-8700，GPU 僅 2 GB 實際用 CPU）約 **3 分鐘 / 10 
 | `src/community/gold.py` | 抽樣（含加強抽樣與多輪）、提示詞 v1 / v2、續跑式標註流程 |
 | `src/community/labelers.py` | 標註後端：Ollama（預設 qwen3:8b）/ Claude API（Haiku 4.5） |
 | `src/community/annotate.py`、`annotate.html` | 本機人工標註網頁（不顯示模型標註） |
-| `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa |
+| `src/community/review.py` | 待標清單（AI 判多空全收＋中立對照抽樣）與分層權重 |
+| `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa（支援分層加權） |
 | `src/community/classifier.py` | 可替換分類器介面、TF-IDF + 邏輯迴歸、多數類別基準 |
-| `src/community/evaluate.py` | macro-F1、混淆矩陣、ECE、Brier |
-| `src/community/__main__.py` | CLI：prepare / groups / sample / label / annotate / compare / train |
-| `tests/test_community.py` | 社群模式測試（全專案共 119 個測試） |
+| `src/community/evaluate.py` | macro-F1、混淆矩陣、ECE、Brier（支援樣本權重） |
+| `src/community/__main__.py` | CLI：prepare / groups / sample / label / review-queue / annotate / compare / train |
+| `tests/test_community.py`、`tests/test_review.py` | 社群模式測試（全專案共 127 個測試） |
 
 ---
 

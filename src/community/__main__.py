@@ -22,6 +22,15 @@ DATA = Path("data/community")
 DB = str(DATA / "community.db")
 SAMPLE = str(DATA / "gold_sample.jsonl")
 LABEL_DIR = DATA / "labels"
+QUEUE = str(DATA / "review_queue.jsonl")
+
+
+def _queue_weights(queue_path: str, labelled_ids: set) -> "dict | None":
+    """Stratum weights for human-labelled review-queue items, or None without a queue."""
+    from .gold import read_jsonl
+    from .review import stratum_weights
+    queue = read_jsonl(queue_path)
+    return stratum_weights(queue, labelled_ids) if queue else None
 
 
 def _labels_path(name_or_path: str) -> str:
@@ -128,11 +137,38 @@ def cmd_label(args):
         print(f"[label] {split}: {stats}")
 
 
+def cmd_review_queue(args):
+    from .gold import read_jsonl
+    from .review import build_queue, summarize
+
+    if Path(args.out).exists() and not args.force:
+        sys.exit(f"{args.out} 已存在。已標的人工標註依這份清單加權，換清單會讓權重失效；確定要重建請加 --force")
+    names = args.sources.split(",") if args.sources else [s for s in _available_sources() if s != "human"]
+    sources = {n: {r["id"]: r for r in read_jsonl(_labels_path(n))} for n in names}
+    # Earlier human labels came from the random test split, so they can join their
+    # stratum without breaking the weights
+    keep = frozenset(r["id"] for r in read_jsonl(_labels_path("human")))
+    queue = build_queue(read_jsonl(args.sample), sources, control=args.control, seed=args.seed, keep=keep)
+    Path(args.out).write_text("".join(json.dumps(q, ensure_ascii=False) + "\n" for q in queue), encoding="utf-8")
+    print(f"[review-queue] 依據 {', '.join(names)} 產生 {len(queue)} 則 → {args.out}")
+    for split, info in summarize(queue).items():
+        d, n = info.get("ai_directional", {}), info.get("ai_neutral", {})
+        print(f"   {split:<12} AI 判多空 {d.get('queued', 0)}（全收，其中意見不一 {info['disputed']}）"
+              f"｜AI 判中立 抽 {n.get('queued', 0)} / {n.get('population', 0)} 作對照")
+
+
 def cmd_annotate(args):
     import uvicorn
 
     from .annotate import create_app
-    app = create_app(args.sample, _labels_path("human"), split=args.split, limit=args.limit)
+    from .gold import read_jsonl
+    ids = None
+    if args.queue:
+        queue = read_jsonl(QUEUE)
+        if not queue:
+            sys.exit("還沒有待標清單，請先執行 review-queue")
+        ids = [q["id"] for q in queue]
+    app = create_app(args.sample, _labels_path("human"), split=args.split, limit=args.limit, ids=ids)
     print(f"[annotate] 打開 http://127.0.0.1:{args.port}  （Ctrl+C 結束，標註會即時存檔）")
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
@@ -153,6 +189,10 @@ def cmd_compare(args):
     for r in read_jsonl(args.sample):
         by_split.setdefault(r["split"], set()).add(r["id"])
 
+    # Human labels from the review queue are a stratified sample, so they are
+    # re-weighted to estimate the full split; other references are used as-is.
+    weights = _queue_weights(args.queue, set(reference)) if args.reference == "human" else None
+
     # Random test = realistic mix; enrich_test = mostly directional messages,
     # where bull/bear errors actually show up. Reported separately, never pooled.
     for split in test_splits(read_jsonl(args.sample)):
@@ -160,7 +200,7 @@ def cmd_compare(args):
         for name in candidates:
             cand = usable(_labels_path(name))
             for field in ("stance", "topic"):
-                r = agreement(reference, cand, field, ids=ids)
+                r = agreement(reference, cand, field, ids=ids, weights=weights)
                 if r:
                     print(format_agreement(f"[{split}] {name} vs {args.reference}", field, r))
 
@@ -188,6 +228,12 @@ def cmd_train(args):
         for split in test_splits(samples)
     }
     tests = {k: v for k, v in tests.items() if v}
+    # Human test labels come from the stratified review queue: score with stratum
+    # weights so the numbers estimate the full split, not the over-sampled queue
+    weights = _queue_weights(args.queue, set(test_labels)) if test_source == "human" else None
+    if weights is not None:
+        tests = {k: [g for g in v if g["id"] in weights] for k, v in tests.items()}
+        tests = {k: v for k, v in tests.items() if v}
     if not train or not tests:
         sys.exit(f"標註資料不足：train {len(train)} / 考卷 {sum(map(len, tests.values()))}，請先執行 label / annotate")
     print(f"[train] 訓練：{args.labels}（{len(train)} 則）｜考卷：{test_source}"
@@ -203,7 +249,8 @@ def cmd_train(args):
             report[target][name] = {}
             for split, test in tests.items():
                 X_te, y_te = [g["text"] for g in test], [g[target] for g in test]
-                result = evaluate(model.classes_, model.predict_proba(X_te), y_te)
+                w = [weights[g["id"]] for g in test] if weights is not None else None
+                result = evaluate(model.classes_, model.predict_proba(X_te), y_te, sample_weight=w)
                 report[target][name][split] = result
                 print(format_report(f"[{split}] {target} / {name}", result))
             if name == "tfidf_logreg" and args.show_features:
@@ -261,7 +308,17 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=None, help="只標註前 N 則（先小量試跑）")
     p.set_defaults(func=cmd_label)
 
+    p = sub.add_parser("review-queue", help="產生人工待標清單：AI 判多空的全收＋AI 判中立的抽樣對照")
+    p.add_argument("--sample", default=SAMPLE)
+    p.add_argument("--sources", default=None, help="依據的 AI 標註來源，逗號分隔；預設 labels/ 下除 human 外全部")
+    p.add_argument("--control", type=int, default=60, help="AI 判中立的對照組總數，依各考卷中立數比例分配")
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--out", default=QUEUE)
+    p.add_argument("--force", action="store_true", help="覆蓋既有清單（會讓已標的加權失效）")
+    p.set_defaults(func=cmd_review_queue)
+
     p = sub.add_parser("annotate", help="開啟人工標註網頁（本機）")
+    p.add_argument("--queue", action="store_true", help="只標待標清單（review-queue 產生）中的訊息")
     p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--split", default="test", help="要標的 split，如 test、enrich_test")
     p.add_argument("--limit", type=int, default=300)
@@ -270,6 +327,7 @@ def main(argv=None):
 
     p = sub.add_parser("compare", help="比較各標註來源與參考標註（預設人工）的一致性")
     p.add_argument("--sample", default=SAMPLE)
+    p.add_argument("--queue", default=QUEUE, help="人工標註的待標清單，用於加權")
     p.add_argument("--reference", default="human")
     p.add_argument("--candidates", default=None, help="逗號分隔；預設 labels/ 下所有其他來源")
     p.set_defaults(func=cmd_compare)
@@ -278,6 +336,7 @@ def main(argv=None):
     p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--labels", default=None, help="訓練用的標註來源，如 qwen3-8b")
     p.add_argument("--test-labels", default=None, help="考卷用的標註來源，如 human（預設同 --labels）")
+    p.add_argument("--queue", default=QUEUE, help="人工標註的待標清單，考卷為 human 時用於加權")
     p.add_argument("--targets", default="stance,topic")
     p.add_argument("--report", default=str(DATA / "eval_report.json"))
     p.add_argument("--save-dir", default=str(DATA / "models"))

@@ -128,8 +128,9 @@ python -X utf8 -m src.community prepare        # Telegram 匯出 → SQLite（�
 python -X utf8 -m src.community sample         # 分層抽樣 3,000 則，500 則保留為考卷
 python -X utf8 -m src.community label --limit 20             # 地端 Qwen3 標註（Ollama，可中斷續跑）
 python -X utf8 -m src.community label --backend claude       # 或改用 Claude Haiku（需 ANTHROPIC_API_KEY）
-python -X utf8 -m src.community annotate       # 本機人工標註網頁 http://127.0.0.1:8770
-python -X utf8 -m src.community compare        # 各模型標註 vs 人工標註（accuracy / macro-F1 / kappa）
+python -X utf8 -m src.community review-queue   # 待標清單：AI 判多空全收＋中立對照抽樣
+python -X utf8 -m src.community annotate --queue  # 本機人工標註網頁 http://127.0.0.1:8770
+python -X utf8 -m src.community compare        # 各模型標註 vs 人工標註（分層加權，accuracy / macro-F1 / kappa）
 python -X utf8 -m src.community train --labels qwen3-8b --test-labels human --show-features
 ```
 
