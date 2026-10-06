@@ -346,6 +346,28 @@ def test_prompt_versions_reach_the_model(monkeypatch):
     assert sent[0]["messages"][0]["content"] == PROMPTS["v1"]
     assert sent[1]["messages"][0]["content"] == PROMPTS["v2"]
     assert "情緒本身不是多空" in PROMPTS["v2"] and "情緒本身不是多空" not in PROMPTS["v1"]
+    # v3: reported price moves are stance again, and a market target is required
+    assert "只陳述已經發生的漲跌" not in PROMPTS["v3"] and "找不到市場標的 → neutral" in PROMPTS["v3"]
+    assert make_labeler("ollama", prompt="v3").name == "qwen3-8b-v3"
+
+
+def test_label_queue_restricts_to_review_queue(monkeypatch, tmp_path):
+    import src.community.__main__ as cli
+    import src.community.gold as gold
+    import src.community.labelers as labelers
+
+    sample = tmp_path / "sample.jsonl"
+    sample.write_text("".join(json.dumps({"id": i, "split": s, "text": "x"}) + "\n" for i, s in
+                              [("a", "test"), ("b", "test"), ("c", "enrich_test"), ("d", "train")]), encoding="utf-8")
+    queue = tmp_path / "queue.jsonl"
+    queue.write_text("".join(json.dumps({"id": i}) + "\n" for i in ["b", "c"]), encoding="utf-8")
+    monkeypatch.setattr(cli, "QUEUE", str(queue))
+    monkeypatch.setattr(cli, "LABEL_DIR", tmp_path)
+    monkeypatch.setattr(labelers, "make_labeler", lambda *a, **k: type("L", (), {"name": "fake", "model": "m"})())
+    seen = []
+    monkeypatch.setattr(gold, "label_gold", lambda *a, ids, **k: seen.append(ids) or {})
+    cli.main(["label", "--sample", str(sample), "--queue", "--split", "test,enrich_test,train"])
+    assert seen == [{"b"}, {"c"}]
 
 
 @pytest.mark.parametrize("text,expected", [

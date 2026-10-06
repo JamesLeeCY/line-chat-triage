@@ -121,6 +121,11 @@ def cmd_label(args):
     workers = args.workers or (1 if local else 4)  # a CPU-bound Ollama gains nothing from parallel calls
     out = _labels_path(args.labels or labeler.name)
     samples = read_jsonl(args.sample)
+    if args.queue:
+        queued = {q["id"] for q in read_jsonl(QUEUE)}
+        if not queued:
+            sys.exit("還沒有待標清單，請先執行 review-queue")
+        samples = [r for r in samples if r["id"] in queued]
     # Splits run in the order given, so e.g. "test,enrich_test,enrich_train" finishes the
     # small held-out sets first and they can be compared while training labels continue
     splits = sorted({r["split"] for r in samples}) if args.split == "all" else args.split.split(",")
@@ -268,6 +273,8 @@ def cmd_train(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m src.community", description="社群模式：多空與話題分析")
+    from .gold import PROMPTS
+
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("prepare", help="把 Telegram 匯出轉進 SQLite")
@@ -299,13 +306,15 @@ def main(argv=None):
                    help="只適用 Claude Opus / Sonnet；Haiku 與 Ollama 不支援")
     p.add_argument("--ollama-url", default="http://localhost:11434")
     p.add_argument("--sample", default=SAMPLE)
-    p.add_argument("--prompt", default="v2", choices=["v1", "v2"], help="提示詞版本（v1 結果存在不帶版本的檔名）")
+    p.add_argument("--prompt", default="v2", choices=sorted(PROMPTS), help="提示詞版本（v1 結果存在不帶版本的檔名）")
     p.add_argument("--labels", default=None, help="輸出的標註來源名稱（預設用模型名＋提示詞版本）")
     p.add_argument("--split", default="all",
                    help="all，或依序執行的 split 清單，如 test,enrich_test,enrich_train")
     p.add_argument("--batch-size", type=int, default=None, help="預設 ollama 10、claude 25")
     p.add_argument("--workers", type=int, default=None, help="預設 ollama 1、claude 4")
     p.add_argument("--limit", type=int, default=None, help="只標註前 N 則（先小量試跑）")
+    p.add_argument("--queue", action="store_true",
+                   help="只標待標清單（review_queue.jsonl）裡的訊息：新提示詞可直接和人工標註比較")
     p.set_defaults(func=cmd_label)
 
     p = sub.add_parser("review-queue", help="產生人工待標清單：AI 判多空的全收＋AI 判中立的抽樣對照")

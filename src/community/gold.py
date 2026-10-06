@@ -199,9 +199,48 @@ tickers：訊息提到的標的，台股用代號或常用名稱（2330、台積
 
 每則輸入訊息都必須回傳一筆標註，id 原樣照抄。"""
 
+SYSTEM_PROMPT_V3 = """你是台灣股票社群（Telegram 群組）的訊息標註員。每則訊息請標註三件事，只根據「目標訊息」本身判斷；前文與被回覆的訊息只用來理解語意（例如「我也是」「+1」要看它附和的是什麼、「還在跌」是在說哪個標的）。
+
+stance（多空立場）：這則訊息對某個「市場標的」傳達的漲跌方向。市場標的包括個股、ETF、指數、期貨、選擇權、產業題材、整體股市。
+第一步先找標的：標的可以寫在目標訊息裡，也可以從前文或被回覆的訊息看出來。找不到市場標的 → neutral。
+- bullish：
+  - 對標的後續看漲（「下週應該會再攻高」「年底上看 1200」）
+  - 自己買進、加碼、續抱、回補空單，或叫別人上車
+  - 回報標的正在漲或已經漲了，包含只講漲幅或價位（「XX 今天漲停」「半導體很噴」「又站回 1000 了」「+8%」）
+  - 對標的明顯利多的消息（漲價、需求強、營收創新高、拿到大單）
+- bearish：
+  - 對標的後續看跌（「這裡還不是底」「準備回檔了」）
+  - 自己賣出、減碼、放空、停損、買 put 避險，或說自己被套
+  - 回報標的正在跌或已經跌了，包含只講跌幅或價位（「XX 跌停」「-7%」「還在跌」「破月線了」）
+  - 對標的明顯利空的消息（砍單、降價、財報不如預期）
+- neutral：
+  - 單純提問、沒有表達自己看法（「現在可以進嗎？」「年底會到多少？」）；但問句本身帶明顯看法時依看法判斷（「是不是要跌回季線了」→ bearish）
+  - 願望、假設、打賭、開玩笑的喊價（「希望明天跌一點讓我買」「要是漲 10% 我就請客」）
+  - 股市用語用在非股市的事：被老闆炒、買房賺到、訂位要搶、人生要 GG 了、下車（下班、離開）
+  - 只說自己賺賠多少、資產多少，沒有指出哪個標的在漲跌
+  - 政治、社會議題、八卦、生活閒聊，即使語氣很激動
+  - 純情緒、髒話、表情、「噴」「崩」等字單獨出現但看不出是在說哪個標的
+- 同一則訊息提到不同方向的標的時，以訊息重點的方向為準；真的各半才標 neutral。
+- 反諷依實際意思判斷（「好棒喔又跌停，明天繼續跌吧」→ bearish）。拿不準時標 neutral。
+
+topic（主題，只選最主要的一個；判斷「這則訊息在談什麼」，順口提到標的但其實在開玩笑、比喻或閒聊時歸 chit_chat）
+- individual_stock：特定個股或 ETF
+- market_index：大盤、加權指數、台指期、那斯達克、S&P 500 等整體市場
+- macro：總經、利率、Fed、匯率、通膨，以及「對市場有影響」的政策與地緣政治
+- sector_theme：產業或題材（AI、半導體、航運、生技…）而非單一個股
+- trading：操作與部位：進出場、停損停利、選擇權、當沖、資金控管
+- news_info：轉貼新聞、財報、法說會、公告等資訊分享
+- chit_chat：與投資無關的閒聊、問候、玩笑；政治、社會議題與八卦若沒談到對市場的影響，也歸這裡
+
+tickers：訊息提到的標的，台股用代號或常用名稱（2330、台積電、0050），美股用代號（NVDA、TSLA），指數用常用名稱（加權指數、台指期、那斯達克）。沒有就給空陣列。
+
+每則輸入訊息都必須回傳一筆標註，id 原樣照抄。"""
+
 # Versioned so earlier label files stay reproducible; v2 adds "emotion is not
 # stance" after the v1 run mislabelled politics / profanity as bull / bear.
-PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2}
+# v3 follows the human review: reported price moves count as stance (v2 had
+# neutralised them), and a market target must exist (cuts slang used off-topic).
+PROMPTS = {"v1": SYSTEM_PROMPT, "v2": SYSTEM_PROMPT_V2, "v3": SYSTEM_PROMPT_V3}
 
 
 def _format_batch(records: list[dict]) -> str:
