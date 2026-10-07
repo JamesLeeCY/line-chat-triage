@@ -5,6 +5,7 @@ Community mode CLI.
     python -X utf8 -m src.community groups              # what's in the store
     python -X utf8 -m src.community sample              # stratified gold sample
     python -X utf8 -m src.community label --limit 20    # local Qwen3 labels (resumable)
+    python -X utf8 -m src.community critique --labels qwen3-8b-v3 --model phi4 --queue  # AI critic revises labels
     python -X utf8 -m src.community annotate            # human labels in the browser
     python -X utf8 -m src.community compare             # each labeller vs human
     python -X utf8 -m src.community train --labels qwen3-8b --test-labels human
@@ -110,16 +111,10 @@ def cmd_sample(args):
         print(f"         group {gid}: {sum(r['group_id'] == gid for r in records)} / {quota}")
 
 
-def cmd_label(args):
+def _label_splits(args, labeler, out: str, batch_size: int, workers: int):
+    """Run `labeler` over the requested splits (optionally only review-queue ids), resumably."""
     from .gold import label_gold, read_jsonl
-    from .labelers import make_labeler
 
-    labeler = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url,
-                           prompt=args.prompt)
-    local = args.backend == "ollama"
-    batch_size = args.batch_size or (10 if local else 25)
-    workers = args.workers or (1 if local else 4)  # a CPU-bound Ollama gains nothing from parallel calls
-    out = _labels_path(args.labels or labeler.name)
     samples = read_jsonl(args.sample)
     if args.queue:
         queued = {q["id"] for q in read_jsonl(QUEUE)}
@@ -129,8 +124,6 @@ def cmd_label(args):
     # Splits run in the order given, so e.g. "test,enrich_test,enrich_train" finishes the
     # small held-out sets first and they can be compared while training labels continue
     splits = sorted({r["split"] for r in samples}) if args.split == "all" else args.split.split(",")
-    print(f"[label] {args.backend}:{labeler.model} prompt {args.prompt} → {out}"
-          f"（每批 {batch_size} 則，{workers} 個併發）")
     for split in splits:
         ids = {r["id"] for r in samples if r["split"] == split}
         if not ids:
@@ -140,6 +133,43 @@ def cmd_label(args):
         stats = label_gold(args.sample, out, labeler=labeler, batch_size=batch_size, workers=workers,
                            limit=args.limit, ids=ids)
         print(f"[label] {split}: {stats}")
+
+
+def _batching(args) -> tuple[int, int]:
+    local = args.backend == "ollama"
+    # a CPU-bound Ollama gains nothing from parallel calls
+    return args.batch_size or (10 if local else 25), args.workers or (1 if local else 4)
+
+
+def cmd_label(args):
+    from .labelers import make_labeler
+
+    labeler = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url,
+                           prompt=args.prompt)
+    batch_size, workers = _batching(args)
+    out = _labels_path(args.labels or labeler.name)
+    print(f"[label] {args.backend}:{labeler.model} prompt {args.prompt} → {out}"
+          f"（每批 {batch_size} 則，{workers} 個併發）")
+    _label_splits(args, labeler, out, batch_size, workers)
+
+
+def cmd_critique(args):
+    from .critique import Critic
+    from .gold import read_jsonl
+    from .labelers import make_labeler
+
+    base = {r["id"]: r for r in read_jsonl(_labels_path(args.labels))}
+    if not base:
+        sys.exit(f"找不到標註來源 {args.labels}，目前有：{', '.join(_available_sources()) or '（無）'}")
+    judge = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url)
+    critic = Critic(judge, base, Path(args.labels).stem)
+    batch_size, workers = _batching(args)
+    out = _labels_path(args.out or critic.name)
+    print(f"[critique] 裁判 {args.backend}:{judge.model} 審查 {args.labels} → {out}"
+          f"（每批 {batch_size} 則，{workers} 個併發）")
+    _label_splits(args, critic, out, batch_size, workers)
+    done = [r for r in read_jsonl(out) if "critique" in r]
+    print(f"[critique] 累計審查 {len(done)} 則，改判 {sum(r['critique']['changed'] for r in done)} 則")
 
 
 def cmd_review_queue(args):
@@ -316,6 +346,21 @@ def main(argv=None):
     p.add_argument("--queue", action="store_true",
                    help="只標待標清單（review_queue.jsonl）裡的訊息：新提示詞可直接和人工標註比較")
     p.set_defaults(func=cmd_label)
+
+    p = sub.add_parser("critique", help="AI 批改迴圈：裁判模型依憑法審查既有標註並改判（可中斷續跑）")
+    p.add_argument("--labels", required=True, help="要審查的標註來源，如 qwen3-8b-v3")
+    p.add_argument("--backend", default="ollama", choices=["ollama", "claude"])
+    p.add_argument("--model", default=None, help="裁判模型，如 phi4；預設 ollama qwen3:8b、claude Haiku 4.5")
+    p.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p.add_argument("--ollama-url", default="http://localhost:11434")
+    p.add_argument("--sample", default=SAMPLE)
+    p.add_argument("--out", default=None, help="輸出來源名稱（預設 <labels>+critic-<裁判模型>）")
+    p.add_argument("--split", default="all")
+    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--workers", type=int, default=None)
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--queue", action="store_true", help="只審查待標清單裡的訊息（可直接和人工比較）")
+    p.set_defaults(func=cmd_critique)
 
     p = sub.add_parser("review-queue", help="產生人工待標清單：AI 判多空的全收＋AI 判中立的抽樣對照")
     p.add_argument("--sample", default=SAMPLE)

@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from pydantic import BaseModel
+
 from .gold import PROMPTS, LabelBatch, _format_batch
 
 
@@ -44,20 +46,24 @@ class ClaudeLabeler:
         self.client, self.model, self.effort, self.prompt = client, model, effort, prompt
         self.name = source_name(model, prompt)
 
-    def label(self, records: list[dict]) -> list[dict]:
+    def ask(self, system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        """One structured call; also used by the critic (critique.py) with its own prompt and schema."""
         # Haiku 4.5 rejects `effort`; only send it when asked (Opus / Sonnet)
         extra = {"output_config": {"effort": self.effort}} if self.effort else {}
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=16000,
-            system=PROMPTS[self.prompt],
-            messages=[{"role": "user", "content": _format_batch(records)}],
-            output_format=LabelBatch,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=schema,
             **extra,
         )
         if response.stop_reason == "refusal":
             raise RuntimeError(f"refused: {getattr(response.stop_details, 'category', None)}")
-        return _keep_requested(response.parsed_output, records)
+        return response.parsed_output
+
+    def label(self, records: list[dict]) -> list[dict]:
+        return _keep_requested(self.ask(PROMPTS[self.prompt], _format_batch(records), LabelBatch), records)
 
 
 class OllamaLabeler:
@@ -73,25 +79,32 @@ class OllamaLabeler:
         self.prompt = prompt
         self.name = source_name(model, prompt)
 
-    def _payload(self, records: list[dict]) -> dict:
+    def _body(self, system: str, user: str, schema: type[BaseModel]) -> dict:
         body = {
             "model": self.model,
             "stream": False,
             "keep_alive": "30m",
-            "format": LabelBatch.model_json_schema(),
+            "format": schema.model_json_schema(),
             "options": {"temperature": 0, "num_ctx": self.num_ctx},
             "messages": [
-                {"role": "system", "content": PROMPTS[self.prompt]},
-                {"role": "user", "content": _format_batch(records)},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
         }
         if self.think is not None:
             body["think"] = self.think
         return body
 
+    def _payload(self, records: list[dict]) -> dict:
+        return self._body(PROMPTS[self.prompt], _format_batch(records), LabelBatch)
+
     def label(self, records: list[dict]) -> list[dict]:
+        return _keep_requested(self.ask(PROMPTS[self.prompt], _format_batch(records), LabelBatch), records)
+
+    def ask(self, system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        """One structured call; also used by the critic (critique.py) with its own prompt and schema."""
         req = urllib.request.Request(
-            f"{self.url}/api/chat", data=json.dumps(self._payload(records)).encode("utf-8"),
+            f"{self.url}/api/chat", data=json.dumps(self._body(system, user, schema)).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
         try:
@@ -101,8 +114,7 @@ class OllamaLabeler:
             raise RuntimeError(f"Ollama {e.code}: {e.read().decode('utf-8', 'replace')[:200]}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"連不到 Ollama（{self.url}），請確認 Ollama 正在執行：{e.reason}") from e
-        content = data.get("message", {}).get("content", "")
-        return _keep_requested(LabelBatch.model_validate_json(content), records)
+        return schema.model_validate_json(data.get("message", {}).get("content", ""))
 
 
 def make_labeler(backend: str, model: Optional[str] = None, effort: Optional[str] = None,
