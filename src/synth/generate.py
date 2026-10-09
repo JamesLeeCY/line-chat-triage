@@ -15,6 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from .progress import call_stats, log_progress
 from .scenarios import Scenario, day_header
 
 SYSTEM = """你是對話編劇，替台灣的設計 / 工程公司產生逼真的 LINE 工作群組訊息。群組裡只有兩種人：
@@ -95,22 +96,31 @@ def write_text(sc: Scenario, model, attempts: int = 3) -> tuple[list[str], dict]
     `attempts`, keeps the version with the fewest role flips and records them.
     """
     wanted = len(sc.slots)
-    best, best_flips, missing = None, None, None
+    best, best_flips, missing, log = None, None, None, []
     for attempt in range(1, attempts + 1):
+        t0 = time.time()
         result = model.ask(SYSTEM, _prompt(sc), Lines)
         by_i = {m.i: m.text.strip() for m in result.messages if 0 <= m.i < wanted and m.text.strip()}
         missing = [i for i in range(wanted) if i not in by_i]
+        texts = [by_i[i] for i in range(wanted)] if not missing else None
+        flips = role_flips(sc, texts) if texts else None
+        log.append({"attempt": attempt, **call_stats(model, t0), "missing": len(missing),
+                    "role_flips": None if flips is None else len(flips)})
         if missing:
             continue
-        texts = [by_i[i] for i in range(wanted)]
-        flips = role_flips(sc, texts)
         if best is None or len(flips) < len(best_flips):
             best, best_flips = texts, flips
         if not flips:
             break
     if best is None:
-        raise RuntimeError(f"{sc.group}: 第 {missing} 則沒有內容")
-    return best, {"attempts": attempt, "role_flips": best_flips}
+        raise GenerationFailed(f"{sc.group}: 第 {missing} 則沒有內容", log)
+    return best, {"attempts": attempt, "role_flips": best_flips, "attempt_log": log}
+
+
+class GenerationFailed(RuntimeError):
+    def __init__(self, message: str, attempt_log: list):
+        super().__init__(message)
+        self.attempt_log = attempt_log
 
 
 def generate(scenarios: list[Scenario], model, out_dir: str) -> dict:
@@ -126,17 +136,24 @@ def generate(scenarios: list[Scenario], model, out_dir: str) -> dict:
     todo = [sc for sc in scenarios if sc.group not in done]
     stats["skipped"] = len(scenarios) - len(todo)
     for k, sc in enumerate(todo, 1):
+        t0 = time.time()
         try:
             texts, qa = write_text(sc, model)
         except Exception as e:                 # keep going; a rerun retries the failed groups
             stats["failed"] += 1
+            log_progress(out, "generate", sc.group, status="failed", seconds=round(time.time() - t0, 1),
+                         error=str(e), attempt_log=getattr(e, "attempt_log", None))
             print(f"[generate] {sc.group} 失敗：{e}", file=sys.stderr)
             continue
+        attempt_log = qa.pop("attempt_log")
         (conv / f"{sc.group}.txt").write_text(render_line_export(sc, texts), encoding="utf-8")
         with open(truth_path, "a", encoding="utf-8") as f:
             # qa: generation checks, not ground truth; role_flips = customer slots still in the
             # staff's voice after the retries
             f.write(json.dumps({**sc.as_dict(), "qa": qa}, ensure_ascii=False) + "\n")
+        log_progress(out, "generate", sc.group, status="ok", seconds=round(time.time() - t0, 1),
+                     attempts=qa["attempts"], role_flips=len(qa["role_flips"]), n_messages=len(sc.slots),
+                     attempt_log=attempt_log)
         stats["generated"] += 1
         elapsed = time.time() - started
         flag = f"，仍有 {len(qa['role_flips'])} 則角色錯亂" if qa["role_flips"] else ""

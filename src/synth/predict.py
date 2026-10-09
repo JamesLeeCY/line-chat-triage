@@ -19,6 +19,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .progress import call_stats, log_progress
+
 LEVELS = ("low", "medium", "high")
 
 # rule metrics → alerts; severities are 0..1 (warn → critical) in src.metrics
@@ -79,9 +81,12 @@ def predict_llm(conv_dir: str, truth: list[dict], model, out_path: str) -> list[
         text = (Path(conv_dir) / f"{t['group']}.txt").read_text(encoding="utf-8")
         now = datetime.fromisoformat(t["now"])
         user = f"現在時間：{now:%Y/%m/%d %H:%M}（星期{'一二三四五六日'[now.weekday()]}）\n\n對話：\n{text}"
+        t0 = time.time()
         try:
             v = model.ask(SYSTEM, user, LLMVerdict)
         except Exception as e:
+            log_progress(path.parent, "predict_llm", t["group"], status="failed", seconds=round(time.time() - t0, 1),
+                         error=str(e))
             print(f"[predict-llm] {t['group']} 失敗：{e}", file=sys.stderr)
             continue
         row = {"group": t["group"], "risk_level": v.risk_level, "alerts": sorted(set(v.alerts)),
@@ -89,6 +94,7 @@ def predict_llm(conv_dir: str, truth: list[dict], model, out_path: str) -> list[
         done[t["group"]] = row
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        log_progress(path.parent, "predict_llm", t["group"], status="ok", **call_stats(model, t0))
         elapsed = time.time() - started
         print(f"[predict-llm] {k}/{len(todo)} {t['group']} → {v.risk_level} {sorted(set(v.alerts))}，"
               f"已花 {elapsed / 60:.0f} 分，預估剩 {elapsed / k * (len(todo) - k) / 60:.0f} 分", file=sys.stderr)

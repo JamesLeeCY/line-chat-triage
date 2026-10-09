@@ -181,6 +181,35 @@ class FlippingWriter(FakeWriter):
 def test_write_text_retries_role_flips_and_records_qa():
     sc = SCENARIOS[1]
     texts, qa = write_text(sc, FlippingWriter(bad_rounds=1))
-    assert qa == {"attempts": 2, "role_flips": []}
+    assert qa["attempts"] == 2 and qa["role_flips"] == [] and len(qa["attempt_log"]) == 2
     texts, qa = write_text(sc, FlippingWriter(bad_rounds=5), attempts=3)
     assert qa["attempts"] == 3 and len(qa["role_flips"]) == 1        # kept, but flagged
+
+
+def test_progress_log_one_line_per_group(tmp_path):
+    generate(SCENARIOS[:3], FlippingWriter(bad_rounds=1), str(tmp_path))
+    rows = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["group"] for r in rows] == [s.group for s in SCENARIOS[:3]]
+    first = rows[0]
+    assert first["step"] == "generate" and first["status"] == "ok" and first["attempts"] == 2
+    assert [a["role_flips"] for a in first["attempt_log"]] == [1, 0] and "seconds" in first
+    # the attempt log stays out of the ground-truth file
+    truth = json.loads((tmp_path / "truth.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert "attempt_log" not in truth["qa"] and truth["qa"]["attempts"] == 2
+    truth_rows = [json.loads(line) for line in (tmp_path / "truth.jsonl").read_text(encoding="utf-8").splitlines()]
+    predict_llm(str(tmp_path / "conversations"), truth_rows,
+                FakeJudge(LLMVerdict, {"reason": "r", "alerts": [], "risk_level": "low"}), str(tmp_path / "pred_llm.jsonl"))
+    rows = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["step"] for r in rows].count("predict_llm") == 3
+
+
+class EmptyWriter(FakeWriter):
+    def ask(self, system, user, schema):
+        return Lines(messages=[])
+
+
+def test_progress_log_records_failures(tmp_path):
+    stats = generate(SCENARIOS[:1], EmptyWriter(), str(tmp_path))
+    assert stats["failed"] == 1
+    row = json.loads((tmp_path / "progress.jsonl").read_text(encoding="utf-8"))
+    assert row["status"] == "failed" and len(row["attempt_log"]) == 3 and "沒有內容" in row["error"]
