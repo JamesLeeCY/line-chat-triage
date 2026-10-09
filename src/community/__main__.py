@@ -9,6 +9,7 @@ Community mode CLI.
     python -X utf8 -m src.community annotate            # human labels in the browser
     python -X utf8 -m src.community compare             # each labeller vs human
     python -X utf8 -m src.community train --labels qwen3-8b --test-labels human
+    python -X utf8 -m src.community series --freq 1h --stance-labels qwen3-8b-v2  # entropy time series
 
 Label sources live in data/community/labels/<name>.jsonl; `human` is the
 annotation page's output, model sources are named after the model.
@@ -301,6 +302,42 @@ def cmd_train(args):
         print(f"\n[train] 報告已存到 {args.report}")
 
 
+def cmd_series(args):
+    import csv
+
+    from .store import CommunityStore
+    from .timeseries import build_series
+
+    model = None
+    if args.stance_labels:
+        from .classifier import TfidfLogReg
+        from .gold import load_gold
+
+        train = [g for g in load_gold(args.sample, _labels_path(args.stance_labels)) if is_train_split(g["split"])]
+        if not train:
+            sys.exit(f"{args.stance_labels} 沒有訓練用 split 的標註")
+        model = TfidfLogReg().fit([g["text"] for g in train], [g["stance"] for g in train])
+        print(f"[series] 多空分類器：{args.stance_labels} 的 {len(train)} 則訓練資料（暫定，品質見 HANDOFF）")
+
+    store = CommunityStore(args.db)
+    groups = [g for g in store.groups() if args.group is None or g[0] == args.group]
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for gid, name, n, _, _ in groups:
+        rows = build_series(store, gid, freq=args.freq, stance_model=model)
+        if not rows:
+            continue
+        path = out_dir / f"{gid}_{args.freq}.csv"
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        active = sum(r["n_msgs"] > 0 for r in rows)
+        with_entity = sum(r["n_entity_msgs"] for r in rows) / max(1, sum(r["n_text"] for r in rows))
+        print(f"[series] {gid}：{len(rows)} 個 {args.freq} 時間窗（有訊息 {active}），"
+              f"提到標的的文字訊息 {with_entity:.0%} → {path}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m src.community", description="社群模式：多空與話題分析")
     from .gold import PROMPTS
@@ -361,6 +398,16 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--queue", action="store_true", help="只審查待標清單裡的訊息（可直接和人工比較）")
     p.set_defaults(func=cmd_critique)
+
+    p = sub.add_parser("series", help="時間序列：每個時間窗的訊息量、標的 entropy、話題轉移、多空分歧")
+    p.add_argument("--db", default=DB)
+    p.add_argument("--group", type=int, default=None, help="只算某個群組 id（預設全部）")
+    p.add_argument("--freq", default="1h", choices=["1h", "4h", "1d"])
+    p.add_argument("--stance-labels", default=None,
+                   help="用這個標註來源的訓練 split 訓練多空分類器並加入多空欄位，如 qwen3-8b-v2；省略則不算多空")
+    p.add_argument("--sample", default=SAMPLE)
+    p.add_argument("--out-dir", default=str(DATA / "series"))
+    p.set_defaults(func=cmd_series)
 
     p = sub.add_parser("review-queue", help="產生人工待標清單：AI 判多空的全收＋AI 判中立的抽樣對照")
     p.add_argument("--sample", default=SAMPLE)

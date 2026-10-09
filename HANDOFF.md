@@ -184,7 +184,24 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
    python -X utf8 -m src.community train --labels qwen3-8b-v2 --test-labels human --show-features
    ```
 
-6. 之後：分類器可考慮加入被回覆訊息作為特徵；取得 Jev early access 後於同一份考卷比較；接著做話題 / 多空分歧 entropy 時間序列與預測模組。
+6. **Entropy 時間序列（2026-10-09 開始，第一版完成，尚未 commit）**
+
+   2,000 則標註暫緩（phi4 6 核約 20 小時、2 核推估 50–60 小時；目前程式尚無 `--threads`，需加 `num_thread`），先往後做時間序列。
+   ```bash
+   python -X utf8 -m src.community series --freq 1d --stance-labels qwen3-8b-v2   # 1h / 4h / 1d，輸出 data/community/series/<群組>_<freq>.csv
+   ```
+   - 每個時間窗（台北時間對齊）：訊息量、發言人數、回覆數、標的 entropy、最熱門標的與佔比、話題轉移（與上一個有標的的時間窗之
+     Jensen–Shannon divergence）、多空（分類器每則取最可能類別再計數）：directional_share、net_sentiment、stance_divergence。
+   - 標的抽取用對照表（`entities.py`，約 90 個個股 / ETF / 指數 / 題材 / 資產，只含公開名稱）：裸 4 位數多為價格與年份、
+     大寫字多為 XD / AI，通用規則雜訊太大。**只有約 5%（台股群）/ 4%（美股群）的文字訊息提到標的**，
+     所以 1 小時窗的話題指標幾乎全是雜訊，話題類請用 4h 或 1d。
+   - 多空改用「取最可能類別計數」：直接加總機率會讓多空比例高估到約 29%（人工推估約 9%），計數後約 7.6%。
+     `stance_divergence` 是 `net_sentiment` 的單調函數、且在每日層級幾乎恆為 0.97–0.99，分析時以 net_sentiment 為主。
+   - 台股群每日：訊息量 lag-1 自相關 0.56、話題轉移 0.49、directional_share 0.46、標的 entropy 0.34、淨多空 0.22；
+     4h 窗受日內作息週期影響，預測時需控制時段 / 星期。美股群只有 41 天，預測先只做台股群（294 天）。
+   - 下一步：預測模組——目標為下一窗爆量、話題轉移、情緒反轉；以 persistence / 季節性為基準，時間序列切分驗證。
+
+7. 之後：分類器可考慮加入被回覆訊息作為特徵；取得 Jev early access 後於同一份考卷比較。
 
 ---
 
@@ -196,12 +213,15 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 | `src/community/gold.py` | 抽樣（含加強抽樣與多輪）、提示詞 v1 / v2、續跑式標註流程 |
 | `src/community/labelers.py` | 標註後端：Ollama（預設 qwen3:8b）/ Claude API（Haiku 4.5） |
 | `src/community/annotate.py`、`annotate.html` | 本機人工標註網頁（不顯示模型標註） |
+| `src/community/entities.py` | 標的對照表（個股 / ETF / 指數 / 題材 / 資產）與抽取 |
+| `src/community/timeseries.py` | 每時間窗的訊息量、標的 entropy、話題轉移、多空；CLI `series` |
+| `src/community/critique.py` | AI 批改迴圈：裁判依憑法檢查題審查標註 |
 | `src/community/review.py` | 待標清單（AI 判多空全收＋中立對照抽樣）與分層權重 |
 | `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa（支援分層加權） |
 | `src/community/classifier.py` | 可替換分類器介面、TF-IDF + 邏輯迴歸、多數類別基準 |
 | `src/community/evaluate.py` | macro-F1、混淆矩陣、ECE、Brier（支援樣本權重） |
-| `src/community/__main__.py` | CLI：prepare / groups / sample / label / review-queue / annotate / compare / train |
-| `tests/test_community.py`、`tests/test_review.py` | 社群模式測試（全專案共 127 個測試） |
+| `src/community/__main__.py` | CLI：prepare / groups / sample / label / critique / review-queue / annotate / compare / train / series |
+| `tests/test_community.py`、`test_review.py`、`test_critique.py`、`test_timeseries.py` | 社群模式測試（全專案共 151 個測試） |
 
 ---
 
