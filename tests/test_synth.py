@@ -1,11 +1,12 @@
 import json
+import re
 from datetime import datetime
 
 import pytest
 
 from src.metrics import _service_minutes as business_minutes_between
 from src.parser import load_employees, parse_file
-from src.synth.generate import Lines, _prompt, generate, render_line_export, role_flips, write_text
+from src.synth.generate import Lines, _prompt_day, generate, render_line_export, role_flips, write_text
 from src.synth.predict import LLMVerdict, predict_llm, predict_rule
 from src.synth.scenarios import ALERTS, build_scenarios
 from src.synth.validate import Fidelity, check_fidelity, score
@@ -61,12 +62,13 @@ class FakeWriter:
 
     def ask(self, system, user, schema):
         assert schema is Lines
-        rows = [line for line in user.splitlines() if line[:1].isdigit() and ". 第" in line]
+        rows = [line for line in user.splitlines() if re.match(r"^\d+\.【", line)]
         msgs = []
         for row in rows:
             i = int(row.split(".", 1)[0])
-            text = "我要退款，也要找你們主管" if "揚言" in row else "好的，收到 " + row.split("】", 1)[1][:15]
-            msgs.append({"i": i, "text": text})
+            who = "客戶" if "【客戶說】" in row else "員工"
+            text = "我要退款，也要找你們主管" if "揚言" in row else "好的，收到 " + row.split("）", 1)[1][:15]   # intent only, not the sender's display name
+            msgs.append({"i": i, "who": who, "text": text})
         return Lines(messages=msgs)
 
 
@@ -143,11 +145,14 @@ def test_llm_predictor_and_fidelity_are_resumable(tmp_path):
     assert len(rows) == 3 and all(r["faithful"] for r in rows)
 
 
-def test_prompt_marks_who_is_speaking():
+def test_day_prompts_mark_who_is_speaking_and_carry_history():
     sc = SCENARIOS[0]
-    prompt = _prompt(sc)
-    assert prompt.count("【客戶說】") == sum(s.role == "customer" for s in sc.slots)
-    assert prompt.count("【員工說】") == sum(s.role == "staff" for s in sc.slots)
+    days = sorted({s.day for s in sc.slots})
+    written = {i: f"第{s.day}天的話{i}" for i, s in enumerate(sc.slots)}
+    prompts = [_prompt_day(sc, d, written) for d in days]
+    assert sum(p.count("【客戶說】") for p in prompts) == sum(s.role == "customer" for s in sc.slots)
+    assert sum(p.count("【員工說】") for p in prompts) == sum(s.role == "staff" for s in sc.slots)
+    assert "前幾天" not in prompts[0] and "第0天的話" in prompts[1] and "第1天的話" not in prompts[1]
     assert all(("我是客戶" in s.intent) == (s.role == "customer") for s in sc.slots)
 
 
@@ -160,19 +165,21 @@ def test_role_flips_flags_customer_in_staff_voice():
     texts[cust[0]] = f"{own}，非常抱歉，我們會立刻改善"          # pilot failure: apology to themselves
     texts[cust[1]] = "我真的很不滿，再拖我就要退訂金"               # a real customer threat: fine
     texts[staff[0]] = f"{own}您好，我們會盡快處理"                  # staff may address the customer
-    assert role_flips(sc, texts) == [cust[0]]
+    texts[staff[1]] = "隔間現在進度到哪了？我這邊要安排家具進場"      # pilot 2: customer line in a staff slot
+    assert role_flips(sc, texts) == sorted([cust[0], staff[1]])
 
 
 class FlippingWriter(FakeWriter):
-    """First answer puts a staff apology in a customer's mouth; later answers are fine."""
+    """The first `bad_rounds` answers for day 1 put a staff apology in a customer's mouth."""
 
     def __init__(self, bad_rounds):
         self.bad_rounds, self.calls = bad_rounds, 0
 
     def ask(self, system, user, schema):
-        self.calls += 1
         out = super().ask(system, user, schema)
-        if self.calls <= self.bad_rounds:
+        if "今天是第1天" in user:
+            self.calls += 1
+        if "今天是第1天" in user and self.calls <= self.bad_rounds:
             first_customer = next(int(line.split(".", 1)[0]) for line in user.splitlines() if "【客戶說】" in line)
             next(m for m in out.messages if m.i == first_customer).text = "我們會向上回報，請再給我們一點時間"
         return out
@@ -180,10 +187,35 @@ class FlippingWriter(FakeWriter):
 
 def test_write_text_retries_role_flips_and_records_qa():
     sc = SCENARIOS[1]
+    n_days = len({s.day for s in sc.slots})
     texts, qa = write_text(sc, FlippingWriter(bad_rounds=1))
-    assert qa["attempts"] == 2 and qa["role_flips"] == [] and len(qa["attempt_log"]) == 2
+    # only the bad day is rewritten: one extra call, not a whole-group redo
+    assert qa["attempts"] == n_days + 1 and qa["role_flips"] == [] and len(qa["attempt_log"]) == n_days + 1
     texts, qa = write_text(sc, FlippingWriter(bad_rounds=5), attempts=3)
-    assert qa["attempts"] == 3 and len(qa["role_flips"]) == 1        # kept, but flagged
+    assert qa["attempts"] == n_days + 2 and len(qa["role_flips"]) == 1   # day 1 kept after 3 tries, flagged
+
+
+class WhoSwapWriter(FakeWriter):
+    """Echoes the wrong speaker for one slot on the first call: the misalignment pilot 2 hit."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def ask(self, system, user, schema):
+        self.calls += 1
+        out = super().ask(system, user, schema)
+        if self.calls == 1:
+            m = out.messages[1]
+            m.who = "員工" if m.who == "客戶" else "客戶"
+        return out
+
+
+def test_write_text_detects_who_mismatch():
+    sc = SCENARIOS[2]
+    writer = WhoSwapWriter()
+    texts, qa = write_text(sc, writer)
+    assert qa["attempt_log"][0]["who_mismatch"] == 1 and qa["attempt_log"][1]["day"] == 0
+    assert qa["role_flips"] == []
 
 
 def test_progress_log_one_line_per_group(tmp_path):
@@ -191,11 +223,12 @@ def test_progress_log_one_line_per_group(tmp_path):
     rows = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [r["group"] for r in rows] == [s.group for s in SCENARIOS[:3]]
     first = rows[0]
-    assert first["step"] == "generate" and first["status"] == "ok" and first["attempts"] == 2
-    assert [a["role_flips"] for a in first["attempt_log"]] == [1, 0] and "seconds" in first
+    n_days = len({s.day for s in SCENARIOS[0].slots})
+    assert first["step"] == "generate" and first["status"] == "ok" and first["attempts"] == n_days + 1
+    assert [a["role_flips"] for a in first["attempt_log"]][:2] == [1, 0] and "seconds" in first
     # the attempt log stays out of the ground-truth file
     truth = json.loads((tmp_path / "truth.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert "attempt_log" not in truth["qa"] and truth["qa"]["attempts"] == 2
+    assert "attempt_log" not in truth["qa"] and truth["qa"]["attempts"] == n_days + 1
     truth_rows = [json.loads(line) for line in (tmp_path / "truth.jsonl").read_text(encoding="utf-8").splitlines()]
     predict_llm(str(tmp_path / "conversations"), truth_rows,
                 FakeJudge(LLMVerdict, {"reason": "r", "alerts": [], "risk_level": "low"}), str(tmp_path / "pred_llm.jsonl"))

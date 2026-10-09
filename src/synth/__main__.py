@@ -103,44 +103,47 @@ def cmd_score(args):
 
 
 def cmd_bench(args):
-    """One real group per model at the given thread count; projects 10 / 100 groups."""
-    from .generate import SYSTEM as GEN_SYSTEM
-    from .generate import Lines, _prompt, render_line_export
+    """One real group per step at the given thread count; projects 10 / 100 groups."""
+    from .generate import render_line_export, write_text
     from .predict import SYSTEM as PRED_SYSTEM
     from .predict import LLMVerdict
 
     sc = build_scenarios(1, seed=args.seed)[0]
     results = {}
 
-    def timed(model_name, system, user, schema, temperature=0.0):
-        model = _ollama(model_name, args.threads, temperature)
-        t0 = time.time()
-        out = model.ask(system, user, schema)
-        wall = time.time() - t0
-        st = model.last_stats
-        pe, pdur = st["prompt_eval_count"] or 0, (st["prompt_eval_duration"] or 1) / 1e9
-        ge, gdur = st["eval_count"] or 0, (st["eval_duration"] or 1) / 1e9
-        r = {"wall_s": round(wall, 1), "prompt_tokens": pe, "prompt_tok_s": round(pe / pdur, 2),
-             "output_tokens": ge, "output_tok_s": round(ge / gdur, 2)}
-        print(f"[bench] {model_name}（threads={args.threads}）：輸入 {pe} token @ {r['prompt_tok_s']}/s，"
-              f"輸出 {ge} token @ {r['output_tok_s']}/s，實際 {wall / 60:.1f} 分（含載入模型）")
-        return out, r
+    gen = _ollama(args.gen_model, args.threads, temperature=0.7)
+    t0 = time.time()
+    texts, qa = write_text(sc, gen)
+    wall = time.time() - t0
+    calls = qa["attempt_log"]
+    results["A"] = {"per_group_min": round(wall / 60, 1), "calls": len(calls),
+                    "prompt_tokens": sum(c["prompt_tokens"] or 0 for c in calls),
+                    "output_tokens": sum(c["output_tokens"] or 0 for c in calls),
+                    "flagged_after_retries": len(qa["role_flips"])}
+    print(f"[bench] A {args.gen_model}（threads={args.threads}）：{len(calls)} 次呼叫、"
+          f"輸入 {results['A']['prompt_tokens']} / 輸出 {results['A']['output_tokens']} token，"
+          f"{wall / 60:.1f} 分（含載入模型），重寫後仍有 {len(qa['role_flips'])} 則錯位或口吻不符")
+    conv = render_line_export(sc, texts)
+    sample = DATA / "bench" / f"{sc.group}.txt"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text(conv, encoding="utf-8")
 
-    lines, results["A"] = timed(args.gen_model, GEN_SYSTEM, _prompt(sc), Lines, temperature=0.7)
-    by_i = {m.i: m.text for m in lines.messages}
-    conv = render_line_export(sc, [by_i.get(i, "（空）") for i in range(len(sc.slots))])
-    user = f"現在時間：{sc.now.replace('T', ' ')}\n\n對話：\n{conv}"
-    _, results["B"] = timed(args.pred_model, PRED_SYSTEM, user, LLMVerdict)
+    pred = _ollama(args.pred_model, args.threads)
+    t0 = time.time()
+    pred.ask(PRED_SYSTEM, f"現在時間：{sc.now.replace('T', ' ')}\n\n對話：\n{conv}", LLMVerdict)
+    wall = time.time() - t0
+    st = pred.last_stats
+    results["B"] = {"per_group_min": round(wall / 60, 1), "calls": 1,
+                    "prompt_tokens": st["prompt_eval_count"], "output_tokens": st["eval_count"]}
+    print(f"[bench] B {args.pred_model}（threads={args.threads}）：輸入 {st['prompt_eval_count']} / "
+          f"輸出 {st['eval_count']} token，{wall / 60:.1f} 分（含載入模型）")
     for step, r in results.items():
-        # per group from the measured token rates (model load time excluded)
-        per = r["prompt_tokens"] / r["prompt_tok_s"] + r["output_tokens"] / r["output_tok_s"]
-        r["per_group_min"] = round(per / 60, 1)
-        print(f"[bench] {step}：每群組約 {per / 60:.1f} 分 → 10 群組約 {per * 10 / 3600:.1f} 小時，"
-              f"100 群組約 {per * 100 / 3600:.1f} 小時")
+        per = r["per_group_min"]
+        print(f"[bench] {step}：每群組約 {per:.1f} 分 → 10 群組約 {per * 10 / 60:.1f} 小時，"
+              f"100 群組約 {per * 100 / 60:.1f} 小時")
     out = DATA / f"bench_threads{args.threads}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print(f"[bench] 結果已存到 {out}")
+    print(f"[bench] 結果已存到 {out}；生成的對話範例：{sample}")
 
 
 def main(argv=None):
