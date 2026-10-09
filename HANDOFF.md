@@ -1,6 +1,6 @@
-# HANDOFF — 社群模式（股票社群多空分析）
+# HANDOFF — 社群模式（股票社群多空分析）與合成評估（主管群組警示驗證）
 
-最後更新：2026-10-06（人工驗證完成）
+最後更新：2026-10-09（合成評估：程式完成、第二次試跑中）
 
 本文件記錄社群模式目前的進度、實驗結果與下一步，供下一次接手（人或 Claude）直接延續。
 **本 repo 為公開 repo**：所有群組訊息、標註與資料庫都在 `data/community/`、`data/telegram/`（已排除於版控），本文件只記錄統計數字，不引用任何真實訊息內容。
@@ -257,6 +257,7 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 | `src/community/timeseries.py` | 每時間窗的訊息量、標的 entropy、話題轉移（含固定樣本數版）、多空；CLI `series` |
 | `src/community/predict.py` | 下一窗爆量 / 話題轉移 / 情緒反轉預測，逐層特徵消融與區塊 bootstrap CI；CLI `predict` |
 | `src/community/critique.py` | AI 批改迴圈：裁判依憑法檢查題審查標註 |
+| `src/synth/` | 合成評估：`scenarios.py` 劇本與標準答案、`generate.py`（A）、`predict.py`（B）、`validate.py`（C 與計分）、CLI `python -m src.synth` |
 | `src/community/review.py` | 待標清單（AI 判多空全收＋中立對照抽樣）與分層權重 |
 | `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa（支援分層加權） |
 | `src/community/classifier.py` | 可替換分類器介面、TF-IDF + 邏輯迴歸、多數類別基準 |
@@ -270,3 +271,63 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 
 - 所有功能都在 `main`；舊的功能分支（tripwire 修正、LINE webhook、Telegram 匯入、社群模式）已全部合併並於 2026-10-05 刪除（本機與 GitHub）。
 - 本 repo 為公開 repo：commit 內容不可包含真實群組訊息或成員名稱；`data/telegram/`、`data/community/`、`data/*.db` 已排除於版控。
+
+---
+
+## 8. 合成評估（主管群組警示驗證，2026-10-09 開始）
+
+回到客服 / 主管管理 LINE 工作群組的情境：現有 triage（I1–I6 + tripwire）從未用「有標準答案」的資料驗證過。
+做法：合成 100 個群組，**標準答案由程式埋入**，再看預測方法抓不抓得到。程式在 `src/synth/`，資料在 `data/synth/<run>/`（已排除於版控）。
+
+### 8.1 角色分工（使用者決定）
+
+| 角色 | 模型 | 工作 |
+|------|------|------|
+| 劇本 | 程式（`scenarios.py`） | 每群組 4 個平日（避開週末，因服務時間是平日 09:00–18:00）、平均 27 則（22–36），決定每則的時間、發言者、意圖，並埋入風險與誘餌 |
+| A 生成 | 本機 qwen3:8b，2 核 | 只把每則意圖寫成台灣口語 LINE 訊息，輸出 LINE 匯出格式（現有 parser 直接讀） |
+| B 預測 | 現有規則系統 **和** 本機 phi4（2 核） | 同一輸出格式：風險等級 + 警示清單。B 原本也用 qwen3，使用者改 phi4 以避免「自己出題自己解」 |
+| C 驗證 | Claude（`claude-opus-5-5`） | 檢查對話是否真的表達劇本（揚言像揚言、誘餌沒有意外變危險）；**B 對程式埋的標準答案計分，不對另一個 AI 的意見計分** |
+
+- 埋入的風險：`unanswered_question`（提問後 ≥ 6 個工作小時無人回）、`slow_response`（員工經常隔數小時才回）、
+  `escalation`（72 小時內揚言退款 / 投訴 / 解約 / 找主管）、`negative_sentiment`（越來越不滿但未揚言）。
+- 誘餌（不該觸發）：`resolved_escalation`（超過 72 小時前的揚言、已解決且客戶滿意）、`after_hours`（深夜提問、隔天一早有回）。
+- 風險等級：有 `unanswered_question` 或 `escalation`、或 ≥ 2 個警示 → high；1 個其他警示 → medium；無 → low。100 個劇本：high 48、medium 26、low 26。
+- 規則系統的對應門檻（`predict.py`）：I1 / I2 / I4 severity ≥ 0.5 → 對應警示；tripwire → escalation；composite ≥ 0.6 或 tripwire → high、≥ 0.3 → medium。
+
+### 8.2 運算資源（使用者規定：本機模型最多 2 核；跑之前先評估）
+
+`bench --threads 2` 實測（機器同時跑使用者其他專案，CPU 約 45%）：
+
+| 步驟 | 讀入 | 生成 | 每群組 | 10 群組 | 100 群組 |
+|------|------|------|--------|---------|----------|
+| A qwen3:8b | 11.5 token/s（約 1,370） | 2.1 token/s（約 1,040） | 10.3 分 | 1.7 小時 | 17 小時 |
+| B phi4 | 7.6 token/s（約 1,960） | 1.9 token/s（約 60） | 4.8 分 | 0.8 小時 | 8 小時 |
+
+生成速度受記憶體頻寬限制，與其他程式共用時明顯變慢。長時間執行請在使用者自己的終端機跑（都可續跑）。
+
+### 8.3 試跑紀錄
+
+- **第一次試跑（`pilot`，作廢）**：qwen3 常把**客戶**訊息寫成**員工**口吻（「郭先生，非常抱歉，我們會改善」），
+  3 個 escalation 群組沒有一則真的揚言，negative_sentiment 也多被寫成員工道歉；另有 1 個群組生成失敗。
+  分數因此無效（兩種 B 的 escalation 召回都是 0）。可參考的跡象：phi4 誤報 unanswered_question 5 次、2 個 after_hours 誘餌都誤報；規則系統沒有誤報誘餌，但等級常低估。
+- **修正**：劇本意圖改為第一人稱（「（我是客戶）非常生氣，直接揚言…」）；A 的提示詞每則標【客戶說】/【員工說】並附口吻範例；
+  新增 `role_flips` 檢查（客戶叫自己名字、或出現「我們會」「向上回報」等公司用語）→ 整組重寫，最多 3 次，仍不過則保留並記在 `truth.jsonl` 的 `qa`。
+  檢查**只看口吻**：揚言是否成立交給 C，以免用關鍵字檢查讓規則系統的 tripwire 分數虛高。
+- **第二次試跑（`pilot2`）**：2026-10-09 22:32 開始，進行中，結果待補。
+
+### 8.4 指令
+
+```bash
+python -X utf8 -m src.synth bench --threads 2                  # 2 核實測 A、B 各一群組
+python -X utf8 -m src.synth generate --run pilot2 --n 10 --threads 2
+python -X utf8 -m src.synth predict --run pilot2 --threads 2   # 規則系統 + phi4（--skip-llm 只跑規則）
+python -X utf8 -m src.synth validate --run pilot2              # C：需 ANTHROPIC_API_KEY（目前這台電腦沒有）
+python -X utf8 -m src.synth score --run pilot2                 # 有 validate 結果時另報「只計符合劇本的群組」
+```
+
+### 8.5 下一步
+
+1. 看 `pilot2` 結果：角色錯亂剩多少、兩種 B 的分數。
+2. 使用者設定 `ANTHROPIC_API_KEY` 後跑 C，排除不符劇本的群組。
+3. 試跑合格後跑滿 100 群組（約 25 小時，2 核）。
+4. 依結果改善 B（規則門檻、phi4 誤報 unanswered_question 的傾向）。

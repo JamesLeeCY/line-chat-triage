@@ -278,6 +278,37 @@ python -X utf8 -m src.community predict --freq 4h   # 預測下一時間窗的�
 
 **下一步**：改善多空標註後重跑情緒反轉、非線性模型、擴大標的表後重測新標的特徵。細節見 [HANDOFF.md](HANDOFF.md)。
 
+### 合成評估（主管群組警示驗證）
+
+現有 triage 的警示準不準，需要「有標準答案」的群組才量得出來。`src/synth/` 合成主管管理的 LINE 工作群組，**標準答案由程式埋入**：
+
+| 角色 | 模型 | 工作 |
+|---|---|---|
+| 劇本 | 程式 | 每群組 4 個平日、約 27 則訊息；決定每則的時間、發言者與意圖，埋入風險與誘餌，標準答案因此必然成立 |
+| A 生成 | 本機 qwen3:8b | 只把每則意圖寫成台灣口語的 LINE 訊息，輸出 LINE 匯出格式 |
+| B 預測 | 現有規則系統、本機 phi4 | 只看對話，輸出風險等級與警示 |
+| C 驗證 | Claude | 檢查對話是否真的表達劇本；B 對程式埋的標準答案計分，而不是對另一個 AI 的意見計分 |
+
+- **埋入的風險**：提問超過 6 個工作小時無人回、員工經常很晚才回、72 小時內揚言退款 / 投訴 / 找主管、客戶越來越不滿但未揚言。
+- **誘餌**（不該觸發警示）：超過 72 小時前已解決的揚言、深夜提問隔天一早就有回覆 — 用來量誤報。
+- **評分**：各警示的 precision / recall、風險等級正確率與混淆、誘餌誤報率、高風險排序 AUC。
+
+```bash
+python -X utf8 -m src.synth bench --threads 2                 # 以 2 核實測 A、B 的速度
+python -X utf8 -m src.synth generate --n 10 --threads 2       # A：生成前 10 個群組與標準答案（可續跑）
+python -X utf8 -m src.synth predict --threads 2               # B：規則系統 + phi4
+python -X utf8 -m src.synth validate                          # C：需 ANTHROPIC_API_KEY
+python -X utf8 -m src.synth score                             # 對標準答案評分
+```
+
+**目前進度（2026-10-09）**
+
+- 本機模型限制 2 核（`--threads 2`）。實測每群組 A 約 10 分鐘、B 約 5 分鐘，100 個群組約 25 小時。
+- 第一次試跑作廢：小模型常把客戶的訊息寫成員工口吻（「X 先生，非常抱歉，我們會改善」），埋入的揚言因此沒有出現在對話裡，兩種預測方法都不可能抓到。
+  修正方式：每則訊息標明【客戶說】/【員工說】、意圖改為第一人稱，並以程式偵測「客戶用公司口吻說話」，不合格的群組自動重寫。
+  這個檢查只看口吻，揚言是否成立交給 C — 若用關鍵字檢查，會和規則系統的 tripwire 用同一套字而讓它的分數虛高。
+- 第二次試跑進行中，結果待補。細節見 [HANDOFF.md](HANDOFF.md) 第 8 節。
+
 ### 接收 LINE 即時訊息（webhook）
 
 LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍需用匯出 `.txt`。
@@ -308,7 +339,7 @@ python -X utf8 tools/replay_export.py data/conversations/*.txt --url http://loca
 
 | 變數 | 說明 |
 |------|------|
-| `ANTHROPIC_API_KEY` | Claude API 金鑰（僅 `--llm` 模式需要） |
+| `ANTHROPIC_API_KEY` | Claude API 金鑰（`main.py --llm`、社群模式 `--backend claude`、合成評估 `validate` 需要） |
 | `LINE_CHANNEL_SECRET` | 驗證 webhook 簽章（webhook 必填） |
 | `LINE_CHANNEL_ACCESS_TOKEN` | 查詢群組名稱與成員顯示名稱（選填；未設定時以 userId 顯示） |
 | `LINE_DB_PATH` | webhook 資料庫路徑（預設 `data/line.db`） |
@@ -337,7 +368,8 @@ line_chat/
 │   ├── line_adapter.py       # webhook 事件 → 資料列
 │   ├── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
 │   ├── telegram_export.py    # Telegram Desktop JSON 匯出解析
-│   └── community/            # 社群模式：SQLite 儲存、抽樣、標註器、AI 批改、人工標註網頁、分類器、標的抽取、entropy 時間序列、預測
+│   ├── community/            # 社群模式：SQLite 儲存、抽樣、標註器、AI 批改、人工標註網頁、分類器、標的抽取、entropy 時間序列、預測
+│   └── synth/                # 合成評估：劇本與標準答案、A 生成、B 預測（規則 / LLM）、C 驗證與評分
 ├── tools/
 │   └── replay_export.py      # 將匯出檔重播為 webhook 事件（本機演練用）
 ├── tests/                    # pytest
