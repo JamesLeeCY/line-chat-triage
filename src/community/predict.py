@@ -16,6 +16,8 @@ Feature sets are nested so each step's contribution is visible:
   +entropy entity entropy, top-entity share, topic shift, entity coverage
   +heat    topic heat (fastest-rising entity's surge, entity-mention growth)
            and novelty (share / number of entities unseen in the past week)
+  +speaker speaker concentration (rarefied speaker entropy, top-1 / top-5 share)
+           and newcomers (share of messages from people unseen in the past week)
   +stance  directional share, net sentiment (provisional classifier)
 plus a persistence baseline (the target's own value at t).
 
@@ -47,6 +49,7 @@ BASE = ["slot_sin", "slot_cos", "weekend", "market_next", "log_vol", "log_vol_la
 # rarefied (fixed-sample-size) measures only: the raw ones mostly track mention counts
 ENTROPY = ["entity_entropy_rare_f", "topic_shift_rare_f", "topic_missing", "top_entity_share", "entity_coverage"]
 HEAT = ["heat_surge", "entity_volume_growth", "new_entity_share", "n_new_entities"]
+SPEAKER = ["speaker_entropy_rare_f", "top_speaker_share", "top5_speaker_share", "new_speaker_share_f"]
 STANCE = ["directional_share", "net_sentiment_f"]
 
 
@@ -90,6 +93,9 @@ def add_features(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     df["topic_missing"] = df["topic_shift_rare"].isna().astype(float)
     for col in ("entity_entropy_rare", "topic_shift_rare"):
         # windows with too few mentions: fill with the past median, flagged by topic_missing
+        df[f"{col}_f"] = df[col].fillna(df[col].expanding().median().shift(1)).fillna(df[col].median())
+    for col in ("speaker_entropy_rare", "new_speaker_share"):
+        # quiet windows (< SPEAKER_K messages) / no lookback yet: past median, like the topic columns
         df[f"{col}_f"] = df[col].fillna(df[col].expanding().median().shift(1)).fillna(df[col].median())
     if "net_sentiment" in df:
         df["net_sentiment_f"] = df["net_sentiment"].fillna(0.0)
@@ -202,9 +208,10 @@ def walk_forward(df: pd.DataFrame, target: str, feature_sets: dict[str, list[str
 def run(df: pd.DataFrame, freq: str, n_splits: int = 5) -> dict:
     df = add_targets(add_features(df, freq))
     has_stance = "net_sentiment" in df
-    sets = {"base": BASE, "+entropy": BASE + ENTROPY, "+heat": BASE + ENTROPY + HEAT}
+    sets = {"base": BASE, "+entropy": BASE + ENTROPY, "+heat": BASE + ENTROPY + HEAT,
+            "+speaker": BASE + ENTROPY + HEAT + SPEAKER}
     if has_stance:
-        sets["+stance"] = BASE + ENTROPY + HEAT + STANCE
+        sets["+stance"] = BASE + ENTROPY + HEAT + SPEAKER + STANCE
     results = {
         "burst": walk_forward(df, "y_burst", sets, "burst_now", n_splits),
         "shift": walk_forward(df, "y_shift", sets, "shift_now", n_splits),

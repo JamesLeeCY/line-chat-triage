@@ -28,6 +28,8 @@ def _series(n=6 * 7 * 12, seed=0):
         "top_entity_share": 0.3, "topic_shift_js": shift, "entity_entropy_rare": ent_rare, "topic_shift_rare": shift,
         "heat_surge": rng.exponential(2, n), "entity_volume_growth": rng.normal(0, 0.5, n),
         "new_entity_share": 0.0, "n_new_entities": 0,
+        "speaker_entropy_rare": rng.normal(4, 0.3, n), "top_speaker_share": 0.1, "top5_speaker_share": 0.3,
+        "new_speaker_share": 0.02,
         "bull": 10, "bear": 10, "directional_share": 0.07, "net_sentiment": rng.normal(0, 0.2, n),
         "stance_divergence": 1.0, "stance_entropy": 1.0,
     })

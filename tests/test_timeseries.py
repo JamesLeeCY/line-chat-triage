@@ -133,3 +133,17 @@ def test_build_series_has_heat_columns_after_lookback():
     rows = build_series(FakeStore(msgs), 1, freq="1h")
     assert math.isnan(rows[0]["heat_surge"])                      # needs a week of history at 1h
     assert all(math.isnan(r["new_entity_share"]) for r in rows)   # only 31 hours: no full week yet
+
+
+def test_speaker_features():
+    from src.community.timeseries import speaker_features
+    rng = np.random.default_rng(0)
+    history = [{"a", "b"}] * 3
+    one_voice = speaker_features(Counter(a=40), history, new_windows=3, rng=rng)
+    spread = speaker_features(Counter({f"u{i}": 4 for i in range(10)}), history, new_windows=3, rng=rng)
+    assert one_voice["speaker_entropy_rare"] == 0.0 and one_voice["top_speaker_share"] == 1.0
+    assert spread["speaker_entropy_rare"] > 2.5 and spread["top5_speaker_share"] == pytest.approx(0.5)
+    assert spread["new_speaker_share"] == 1.0 and one_voice["new_speaker_share"] == 0.0
+    few = speaker_features(Counter(a=5, c=5), history[:1], new_windows=3, rng=rng)
+    assert math.isnan(few["speaker_entropy_rare"]) and math.isnan(few["new_speaker_share"])   # < 30 msgs; no lookback
+    assert speaker_features(Counter(), history, 3, rng)["top_speaker_share"] == 0.0

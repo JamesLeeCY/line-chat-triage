@@ -141,6 +141,38 @@ def heat_and_novelty(counts: Counter, history: list[Counter], heat_windows: int,
     }
 
 
+SPEAKER_K = 30                   # messages drawn per window for the rarefied speaker entropy
+
+
+def speaker_features(speakers: Counter, history: list[set], new_windows: int,
+                     rng: np.random.Generator) -> dict:
+    """
+    How concentrated the conversation is among its speakers, and how much of it
+    comes from newcomers. Only aggregates leave this function, never speaker ids.
+
+    speaker_entropy_rare: entropy (bits) of who sent SPEAKER_K messages drawn without
+      replacement, averaged over RARE_REPS draws; raw entropy grows with message count.
+      Low = a few people dominate. NaN below SPEAKER_K messages.
+    top_speaker_share / top5_speaker_share: share of messages from the most active 1 / 5.
+    new_speaker_share: share of messages from people not seen in the last `new_windows`
+      windows (NaN until that lookback exists).
+    """
+    total = sum(speakers.values())
+    ranked = [c for _, c in speakers.most_common(5)]
+    entropy, _ = rarefied(speakers, None, rng, k=SPEAKER_K)
+    if len(history) < new_windows:
+        new_share = float("nan")
+    else:
+        seen = set().union(*history[-new_windows:])
+        new_share = sum(c for s, c in speakers.items() if s not in seen) / total if total else 0.0
+    return {
+        "speaker_entropy_rare": entropy,
+        "top_speaker_share": ranked[0] / total if total else 0.0,
+        "top5_speaker_share": sum(ranked) / total if total else 0.0,
+        "new_speaker_share": new_share,
+    }
+
+
 @dataclass
 class _Window:
     n_msgs: int = 0
@@ -148,7 +180,7 @@ class _Window:
     n_sticker: int = 0
     n_media: int = 0
     n_replies: int = 0
-    speakers: set = field(default_factory=set)
+    speakers: Counter = field(default_factory=Counter)   # messages per sender id
     entities: Counter = field(default_factory=Counter)
     n_entity_msgs: int = 0
     stance: Optional[np.ndarray] = None   # messages per predicted class
@@ -174,7 +206,7 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
             key = _bucket(m.ts, width)
             w = windows.setdefault(key, _Window())
             w.n_msgs += 1
-            w.speakers.add(m.sender_id)
+            w.speakers[m.sender_id] += 1
             if m.reply_to is not None:
                 w.n_replies += 1
             if m.kind == "sticker":
@@ -203,8 +235,9 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
     if not windows:
         return []
     classes = list(stance_model.classes_) if stance_model is not None else []
-    rows, prev_entities, history = [], None, []
+    rows, prev_entities, history, speaker_history = [], None, [], []
     rng = np.random.default_rng(0)       # fixed seed: the series is reproducible
+    speaker_rng = np.random.default_rng(1)   # separate stream: adding speaker draws leaves topic columns unchanged
     heat_windows = max(1, max(HEAT_LOOKBACK, 7 * 86400 if width >= 86400 else 0) // width)
     new_windows = max(1, NEW_LOOKBACK // width)
     for t in range(min(windows), max(windows) + width, width):
@@ -231,11 +264,14 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
             "entity_entropy_rare": rare_entropy,
             "topic_shift_rare": rare_shift,
             **heat_and_novelty(w.entities, history, heat_windows, new_windows),
+            **speaker_features(w.speakers, speaker_history, new_windows, speaker_rng),
         }
         if w.entities:
             prev_entities = w.entities
         history.append(w.entities)
         del history[:-new_windows]
+        speaker_history.append(set(w.speakers))
+        del speaker_history[:-new_windows]
         if classes:
             probs = w.stance if w.stance is not None else np.zeros(len(classes))
             mass = dict(zip(classes, probs))
