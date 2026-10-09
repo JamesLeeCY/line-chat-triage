@@ -199,9 +199,39 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
      `stance_divergence` 是 `net_sentiment` 的單調函數、且在每日層級幾乎恆為 0.97–0.99，分析時以 net_sentiment 為主。
    - 台股群每日：訊息量 lag-1 自相關 0.56、話題轉移 0.49、directional_share 0.46、標的 entropy 0.34、淨多空 0.22；
      4h 窗受日內作息週期影響，預測時需控制時段 / 星期。美股群只有 41 天，預測先只做台股群（294 天）。
-   - 下一步：預測模組——目標為下一窗爆量、話題轉移、情緒反轉；以 persistence / 季節性為基準，時間序列切分驗證。
+   - **樣本數混淆（已修正）**：原始標的 entropy 與該窗標的提及數的 Spearman 相關 0.5–0.7、原始話題轉移 −0.4 至 −0.7
+     （小樣本時 plug-in entropy 偏低、JS 偏高）。新增 `entity_entropy_rare` / `topic_shift_rare`：每窗固定抽 10 則提及、
+     重複 20 次取平均（不足 10 則為 NaN），相關降到約 ±0.1 / −0.12 至 −0.23。分析一律用 `*_rare` 欄位。
 
-7. 之後：分類器可考慮加入被回覆訊息作為特徵；取得 Jev early access 後於同一份考卷比較。
+7. **預測模組（2026-10-09 第一版完成，尚未 commit）**
+   ```bash
+   python -X utf8 -m src.community predict --freq 4h      # 預設台股群；輸出 data/community/predict_<群組>_<freq>.json
+   ```
+   - 目標（預測下一窗）：**爆量**＝訊息量 ≥ 同週內時段過去 4 週中位數 × 2；**話題轉移**＝`topic_shift_rare` 超過過去的 80 百分位；
+     **情緒反轉**＝淨多空正負號翻轉（多空訊息 ≥ 10 且 |淨多空| ≥ 0.05 的窗才算）。基準與門檻皆只用過去資料。
+   - 特徵逐層加入：`base`（時段、週末、下一窗是否開盤、訊息量與落後值、季節殘差、發言人數、回覆 / 貼圖比例）→ `+entropy`
+     → `+stance`；另有 persistence 與 base_rate 基準。邏輯迴歸，walk-forward 5 折，ΔAUC 以區塊 bootstrap 估 95% CI。
+   - 台股群結果（AUC；ΔAUC 為 +entropy − base）：
+
+     | 窗 | 目標 | 正例 | base | +entropy | ΔAUC 95% CI | persistence |
+     |----|------|------|------|----------|-------------|-------------|
+     | 1h | 爆量 | 11.9% | **0.800** | 0.795 | [−0.010, −0.001] | 0.620 |
+     | 1h | 話題轉移 | 18.8% | 0.620 | **0.706** | [+0.048, +0.128] | 0.572 |
+     | 1h | 情緒反轉 | 36.8% | 0.528 | 0.532 | [−0.020, +0.032] | 0.574 |
+     | 4h | 爆量 | 6.5% | **0.699** | 0.690 | [−0.022, +0.004] | 0.515 |
+     | 4h | 話題轉移 | 26.2% | 0.592 | **0.663** | [+0.033, +0.105] | 0.555 |
+     | 4h | 情緒反轉 | 36.2% | 0.562 | 0.574 | [−0.025, +0.052] | 0.527 |
+     | 1d | 話題轉移 | 22.2% | 0.599 | **0.653** | [+0.014, +0.102] | 0.569 |
+
+     （1d 爆量只有約 4 個正例、1d 情緒反轉只有 105 窗，不具參考性。）
+   - **結論**：entropy 對「話題轉移」有穩定且顯著的增益（三種時間窗 CI 皆不含 0）；1h / 4h 的增益主要來自前一窗的話題轉移
+     （轉移會成串出現），1d 主要來自當日標的 entropy（注意力越分散，隔天越容易換話題）。爆量由作息季節性與訊息量就能預測，
+     entropy 沒有增益；情緒反轉在目前分類器下接近隨機，需先改善多空標註。
+   - 下一步候選：更多特徵（話題熱度上升速度、新標的出現、發言人集中度）、非線性模型（梯度提升）、把話題轉移的定義改成
+     「最熱門標的換人」等更直觀的事件；多空標註改善後重跑情緒反轉。
+
+
+8. 之後：分類器可考慮加入被回覆訊息作為特徵；取得 Jev early access 後於同一份考卷比較。
 
 ---
 
@@ -214,14 +244,15 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 | `src/community/labelers.py` | 標註後端：Ollama（預設 qwen3:8b）/ Claude API（Haiku 4.5） |
 | `src/community/annotate.py`、`annotate.html` | 本機人工標註網頁（不顯示模型標註） |
 | `src/community/entities.py` | 標的對照表（個股 / ETF / 指數 / 題材 / 資產）與抽取 |
-| `src/community/timeseries.py` | 每時間窗的訊息量、標的 entropy、話題轉移、多空；CLI `series` |
+| `src/community/timeseries.py` | 每時間窗的訊息量、標的 entropy、話題轉移（含固定樣本數版）、多空；CLI `series` |
+| `src/community/predict.py` | 下一窗爆量 / 話題轉移 / 情緒反轉預測，逐層特徵消融與區塊 bootstrap CI；CLI `predict` |
 | `src/community/critique.py` | AI 批改迴圈：裁判依憑法檢查題審查標註 |
 | `src/community/review.py` | 待標清單（AI 判多空全收＋中立對照抽樣）與分層權重 |
 | `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa（支援分層加權） |
 | `src/community/classifier.py` | 可替換分類器介面、TF-IDF + 邏輯迴歸、多數類別基準 |
 | `src/community/evaluate.py` | macro-F1、混淆矩陣、ECE、Brier（支援樣本權重） |
-| `src/community/__main__.py` | CLI：prepare / groups / sample / label / critique / review-queue / annotate / compare / train / series |
-| `tests/test_community.py`、`test_review.py`、`test_critique.py`、`test_timeseries.py` | 社群模式測試（全專案共 151 個測試） |
+| `src/community/__main__.py` | CLI：prepare / groups / sample / label / critique / review-queue / annotate / compare / train / series / predict |
+| `tests/test_community.py`、`test_review.py`、`test_critique.py`、`test_timeseries.py`、`test_predict.py` | 社群模式測試（全專案共 157 個測試） |
 
 ---
 

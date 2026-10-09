@@ -10,6 +10,7 @@ Community mode CLI.
     python -X utf8 -m src.community compare             # each labeller vs human
     python -X utf8 -m src.community train --labels qwen3-8b --test-labels human
     python -X utf8 -m src.community series --freq 1h --stance-labels qwen3-8b-v2  # entropy time series
+    python -X utf8 -m src.community predict --freq 4h        # does entropy predict the group's next window?
 
 Label sources live in data/community/labels/<name>.jsonl; `human` is the
 annotation page's output, model sources are named after the model.
@@ -338,6 +339,20 @@ def cmd_series(args):
               f"提到標的的文字訊息 {with_entity:.0%} → {path}")
 
 
+def cmd_predict(args):
+    from .predict import format_results, load_series, run
+
+    path = Path(args.series_dir) / f"{args.group}_{args.freq}.csv"
+    if not path.exists():
+        sys.exit(f"找不到 {path}，請先執行 series --freq {args.freq}")
+    results = run(load_series(str(path)), args.freq, n_splits=args.splits)
+    print(f"[predict] {path}（walk-forward {args.splits} 折，預測下一個 {args.freq} 時間窗）")
+    print(format_results(results))
+    out = DATA / f"predict_{args.group}_{args.freq}.json"
+    out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[predict] 結果已存到 {out}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m src.community", description="社群模式：多空與話題分析")
     from .gold import PROMPTS
@@ -408,6 +423,13 @@ def main(argv=None):
     p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--out-dir", default=str(DATA / "series"))
     p.set_defaults(func=cmd_series)
+
+    p = sub.add_parser("predict", help="預測下一時間窗的爆量 / 話題轉移 / 情緒反轉，並比較 entropy 特徵的貢獻")
+    p.add_argument("--group", type=int, default=3366841830, help="群組 id（預設台股群）")
+    p.add_argument("--freq", default="4h", choices=["1h", "4h", "1d"])
+    p.add_argument("--splits", type=int, default=5, help="walk-forward 折數")
+    p.add_argument("--series-dir", default=str(DATA / "series"))
+    p.set_defaults(func=cmd_predict)
 
     p = sub.add_parser("review-queue", help="產生人工待標清單：AI 判多空的全收＋AI 判中立的抽樣對照")
     p.add_argument("--sample", default=SAMPLE)

@@ -5,7 +5,9 @@ dynamics (volume bursts, topic shifts, sentiment flips).
 
 Windows are fixed-length buckets in local time (Taiwan, no DST), so a daily
 window is a calendar day. Every column is computed from that window alone,
-except `topic_shift_js`, which compares it with the previous active window.
+except the topic shift columns, which compare it with the previous active window.
+Raw entropy / shift depend on how many mentions a window has; the `*_rare`
+columns redo both on equal-size random draws and are the ones to analyse.
 
 Topic = market entities (entities.py), not free text: entropy over "which
 stocks / indices / themes is the group talking about". Low entropy = the room
@@ -60,6 +62,38 @@ def binary_entropy(p: float) -> float:
     if p <= 0 or p >= 1 or math.isnan(p):
         return 0.0
     return -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
+
+
+RARE_K = 10        # mentions drawn per window for sample-size-free entropy / shift
+RARE_REPS = 20
+
+
+def _draw(rng: np.random.Generator, counts: Counter, k: int) -> Counter:
+    keys = list(counts)
+    picked = rng.multivariate_hypergeometric(np.array([counts[x] for x in keys]), k)
+    return Counter({x: int(n) for x, n in zip(keys, picked) if n})
+
+
+def rarefied(counts: Counter, prev: Optional[Counter], rng: np.random.Generator,
+             k: int = RARE_K, reps: int = RARE_REPS) -> tuple[float, float]:
+    """
+    (entropy, JS shift vs `prev`) averaged over `reps` draws of exactly `k`
+    mentions per window, without replacement. Plug-in entropy is biased low
+    and JS biased high on small samples, so raw values largely track how many
+    mentions a window happened to have; equal-size draws remove that. NaN when
+    a window has fewer than `k` mentions.
+    """
+    nan = float("nan")
+    if sum(counts.values()) < k:
+        return nan, nan
+    usable_prev = prev is not None and sum(prev.values()) >= k
+    ents, shifts = [], []
+    for _ in range(reps):
+        a = _draw(rng, counts, k)
+        ents.append(entropy_bits(a))
+        if usable_prev:
+            shifts.append(js_divergence(a, _draw(rng, prev, k)))
+    return float(np.mean(ents)), (float(np.mean(shifts)) if shifts else nan)
 
 
 @dataclass
@@ -125,9 +159,11 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
         return []
     classes = list(stance_model.classes_) if stance_model is not None else []
     rows, prev_entities = [], None
+    rng = np.random.default_rng(0)       # fixed seed: the series is reproducible
     for t in range(min(windows), max(windows) + width, width):
         w = windows.get(t, _Window())
         top, top_n = (w.entities.most_common(1)[0] if w.entities else (None, 0))
+        rare_entropy, rare_shift = rarefied(w.entities, prev_entities, rng)
         row = {
             "window_start": datetime.fromtimestamp(t, tz=_LOCAL_TZ).strftime("%Y-%m-%d %H:%M"),
             "ts": t,
@@ -144,6 +180,9 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
             "top_entity_share": top_n / sum(w.entities.values()) if w.entities else 0.0,
             # vs the previous window that mentioned anything; NaN when either side is empty
             "topic_shift_js": js_divergence(w.entities, prev_entities) if prev_entities else float("nan"),
+            # the same two measures at a fixed sample size (RARE_K mentions); prefer these for analysis
+            "entity_entropy_rare": rare_entropy,
+            "topic_shift_rare": rare_shift,
         }
         if w.entities:
             prev_entities = w.entities

@@ -88,3 +88,26 @@ def test_build_series_daily_aligned_to_local_midnight():
     rows = build_series(FakeStore(msgs), 1, freq="1d")
     assert [r["window_start"] for r in rows] == ["2026-01-04 00:00", "2026-01-05 00:00"]
     assert "bull" not in rows[0]                                # no stance columns without a model
+
+
+def test_rarefied_removes_sample_size_and_needs_k_mentions():
+    from src.community.timeseries import rarefied
+    rng = np.random.default_rng(0)
+    few = Counter(a=3, b=3)
+    assert all(math.isnan(v) for v in rarefied(few, None, rng, k=10))
+    # samples of one 8-way distribution at very different sizes: raw entropy is biased low on the
+    # small ones, rarefied entropy much less so
+    probs = np.full(8, 1 / 8)
+    def sample(n):
+        return Counter({i: int(c) for i, c in enumerate(rng.multinomial(n, probs)) if c})
+    small = [sample(15) for _ in range(40)]
+    big = [sample(1500) for _ in range(40)]
+    raw_gap = np.mean([entropy_bits(c) for c in big]) - np.mean([entropy_bits(c) for c in small])
+    rare_gap = (np.mean([rarefied(c, None, rng, k=10, reps=20)[0] for c in big])
+                - np.mean([rarefied(c, None, rng, k=10, reps=20)[0] for c in small]))
+    assert raw_gap > 0.25 and abs(rare_gap) < raw_gap / 3
+    big = Counter(a=600, b=600)
+    # identical distributions shift less than disjoint ones
+    _, same = rarefied(big, Counter(a=500, b=500), rng, k=10, reps=50)
+    _, disjoint = rarefied(big, Counter(c=50), rng, k=10, reps=50)
+    assert disjoint == pytest.approx(1.0) and same < 0.2
