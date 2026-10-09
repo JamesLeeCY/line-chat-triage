@@ -111,3 +111,25 @@ def test_rarefied_removes_sample_size_and_needs_k_mentions():
     _, same = rarefied(big, Counter(a=500, b=500), rng, k=10, reps=50)
     _, disjoint = rarefied(big, Counter(c=50), rng, k=10, reps=50)
     assert disjoint == pytest.approx(1.0) and same < 0.2
+
+
+def test_heat_and_novelty():
+    from src.community.timeseries import heat_and_novelty
+    history = [Counter(a=2, b=1)] * 6
+    # not enough history yet → NaN
+    assert math.isnan(heat_and_novelty(Counter(a=1), history[:3], heat_windows=2, new_windows=6)["heat_surge"])
+    out = heat_and_novelty(Counter(a=2, b=9, c=3), history, heat_windows=2, new_windows=6)
+    # b jumps from 1 to 9 per window: z = (9 − 1) / √2; a is flat
+    assert out["heat_entity"] == "b" and out["heat_surge"] == pytest.approx(8 / math.sqrt(2))
+    assert out["entity_volume_growth"] == pytest.approx(math.log((14 + 1) / (3 + 1)))
+    # c was never seen in the lookback: 3 of 14 mentions
+    assert out["n_new_entities"] == 1 and out["new_entity_share"] == pytest.approx(3 / 14)
+    quiet = heat_and_novelty(Counter(), history, heat_windows=2, new_windows=6)
+    assert quiet["heat_surge"] == 0 and quiet["heat_entity"] is None and quiet["new_entity_share"] == 0
+
+
+def test_build_series_has_heat_columns_after_lookback():
+    msgs = [_m(i, DAY0 + i * H, "台積電") for i in range(30)] + [_m(99, DAY0 + 30 * H, "台積電 國巨 國巨")]
+    rows = build_series(FakeStore(msgs), 1, freq="1h")
+    assert math.isnan(rows[0]["heat_surge"])                      # needs a week of history at 1h
+    assert all(math.isnan(r["new_entity_share"]) for r in rows)   # only 31 hours: no full week yet

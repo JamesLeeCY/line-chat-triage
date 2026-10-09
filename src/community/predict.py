@@ -14,6 +14,8 @@ Targets (for window t+1, using only what is known at the end of window t):
 Feature sets are nested so each step's contribution is visible:
   base     seasonality (slot, weekend, market hours next window) + activity lags
   +entropy entity entropy, top-entity share, topic shift, entity coverage
+  +heat    topic heat (fastest-rising entity's surge, entity-mention growth)
+           and novelty (share / number of entities unseen in the past week)
   +stance  directional share, net sentiment (provisional classifier)
 plus a persistence baseline (the target's own value at t).
 
@@ -44,6 +46,7 @@ BASE = ["slot_sin", "slot_cos", "weekend", "market_next", "log_vol", "log_vol_la
         "season_next", "log_speakers", "reply_ratio", "sticker_ratio"]
 # rarefied (fixed-sample-size) measures only: the raw ones mostly track mention counts
 ENTROPY = ["entity_entropy_rare_f", "topic_shift_rare_f", "topic_missing", "top_entity_share", "entity_coverage"]
+HEAT = ["heat_surge", "entity_volume_growth", "new_entity_share", "n_new_entities"]
 STANCE = ["directional_share", "net_sentiment_f"]
 
 
@@ -181,11 +184,17 @@ def walk_forward(df: pd.DataFrame, target: str, feature_sets: dict[str, list[str
             preds[name][test_idx] = model.predict_proba(data.loc[test_idx, features])[:, 1]
     tested = ~np.isnan(preds["base_rate"])
     scores = {name: _score(y[tested], p[tested]).as_dict() for name, p in preds.items()}
-    reference = next(iter(feature_sets))
+    names = list(feature_sets)
+    reference = names[0]
     if len(np.unique(y[tested])) > 1:
-        for name in list(feature_sets)[1:]:
+        # each set vs the base, and vs the set just before it (what its own features add)
+        for prev, name in zip(names, names[1:]):
             lo, hi, p_le0 = block_bootstrap_delta_auc(y[tested], preds[name][tested], preds[reference][tested])
             scores[name].update(delta_auc_ci=[round(lo, 4), round(hi, 4)], p_delta_le0=round(p_le0, 4))
+            if prev != reference:
+                lo, hi, p_le0 = block_bootstrap_delta_auc(y[tested], preds[name][tested], preds[prev][tested])
+                scores[name].update(step_delta_auc_ci=[round(lo, 4), round(hi, 4)], step_vs=prev,
+                                    step_p_delta_le0=round(p_le0, 4))
     return {"n": int(tested.sum()), "first_test_window": str(data.loc[np.argmax(tested), "window_start"]),
             "reference": reference, "scores": scores}
 
@@ -193,9 +202,9 @@ def walk_forward(df: pd.DataFrame, target: str, feature_sets: dict[str, list[str
 def run(df: pd.DataFrame, freq: str, n_splits: int = 5) -> dict:
     df = add_targets(add_features(df, freq))
     has_stance = "net_sentiment" in df
-    sets = {"base": BASE, "+entropy": BASE + ENTROPY}
+    sets = {"base": BASE, "+entropy": BASE + ENTROPY, "+heat": BASE + ENTROPY + HEAT}
     if has_stance:
-        sets["+stance"] = BASE + ENTROPY + STANCE
+        sets["+stance"] = BASE + ENTROPY + HEAT + STANCE
     results = {
         "burst": walk_forward(df, "y_burst", sets, "burst_now", n_splits),
         "shift": walk_forward(df, "y_shift", sets, "shift_now", n_splits),
@@ -213,9 +222,12 @@ def format_results(results: dict) -> str:
             continue
         base = r["scores"]["base_rate"]["base_rate"]
         lines.append(f"== {target}  (測試時間窗 {r['n']}，自 {r['first_test_window']} 起；正例比例 {base:.1%})")
-        lines.append(f"   {'model':<12} {'AUC':>6} {'AP':>6} {'Brier':>7}   ΔAUC vs {r['reference']} [95% CI]")
+        lines.append(f"   {'model':<12} {'AUC':>6} {'AP':>6} {'Brier':>7}   ΔAUC vs {r['reference']} [95% CI]"
+                     f"        ΔAUC vs previous set [95% CI]")
         for name, s in r["scores"].items():
             ci = (f"   [{s['delta_auc_ci'][0]:+.3f}, {s['delta_auc_ci'][1]:+.3f}]  P(Δ≤0)={s['p_delta_le0']:.3f}"
                   if "delta_auc_ci" in s else "")
-            lines.append(f"   {name:<12} {s['auc']:>6.3f} {s['ap']:>6.3f} {s['brier']:>7.4f}{ci}")
+            step = (f"   vs {s['step_vs']}: [{s['step_delta_auc_ci'][0]:+.3f}, {s['step_delta_auc_ci'][1]:+.3f}]"
+                    if "step_delta_auc_ci" in s else "")
+            lines.append(f"   {name:<12} {s['auc']:>6.3f} {s['ap']:>6.3f} {s['brier']:>7.4f}{ci}{step}")
     return "\n".join(lines)

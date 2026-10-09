@@ -96,6 +96,51 @@ def rarefied(counts: Counter, prev: Optional[Counter], rng: np.random.Generator,
     return float(np.mean(ents)), (float(np.mean(shifts)) if shifts else nan)
 
 
+HEAT_LOOKBACK = 86400            # heat baseline: the previous day (a week for daily windows)
+NEW_LOOKBACK = 7 * 86400         # an entity is "new" if not mentioned in the previous week
+
+
+def heat_and_novelty(counts: Counter, history: list[Counter], heat_windows: int, new_windows: int) -> dict:
+    """
+    Topic-heat and new-entity features for one window, from the windows before it.
+
+    heat_surge: the largest Poisson surprise (c − μ) / √(μ + 1) over entities, where μ is
+      the entity's mean mentions per window over the last `heat_windows`; how hard the
+      fastest-rising name is surging. heat_entity is that name.
+    entity_volume_growth: log((mentions now + 1) / (mean mentions per window before + 1)).
+    new_entity_share: share of this window's mentions going to entities not mentioned in
+      the last `new_windows` (a proportion, so its expectation does not grow with sample size).
+    NaN until the full lookback is available.
+    """
+    nan = float("nan")
+    if len(history) < new_windows or len(history) < heat_windows:
+        return {"heat_surge": nan, "heat_entity": None, "entity_volume_growth": nan,
+                "new_entity_share": nan, "n_new_entities": nan}
+    recent = history[-heat_windows:]
+    mean = Counter()
+    for c in recent:
+        mean.update(c)
+    total_now = sum(counts.values())
+    total_before = sum(mean.values()) / heat_windows
+    surge, surge_entity = 0.0, None
+    for e, c in counts.items():
+        mu = mean.get(e, 0) / heat_windows
+        z = (c - mu) / math.sqrt(mu + 1)
+        if z > surge:
+            surge, surge_entity = z, e
+    seen = set()
+    for c in history[-new_windows:]:
+        seen.update(c)
+    new = {e: c for e, c in counts.items() if e not in seen}
+    return {
+        "heat_surge": surge,
+        "heat_entity": surge_entity,
+        "entity_volume_growth": math.log((total_now + 1) / (total_before + 1)),
+        "new_entity_share": sum(new.values()) / total_now if total_now else 0.0,
+        "n_new_entities": len(new),
+    }
+
+
 @dataclass
 class _Window:
     n_msgs: int = 0
@@ -158,8 +203,10 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
     if not windows:
         return []
     classes = list(stance_model.classes_) if stance_model is not None else []
-    rows, prev_entities = [], None
+    rows, prev_entities, history = [], None, []
     rng = np.random.default_rng(0)       # fixed seed: the series is reproducible
+    heat_windows = max(1, max(HEAT_LOOKBACK, 7 * 86400 if width >= 86400 else 0) // width)
+    new_windows = max(1, NEW_LOOKBACK // width)
     for t in range(min(windows), max(windows) + width, width):
         w = windows.get(t, _Window())
         top, top_n = (w.entities.most_common(1)[0] if w.entities else (None, 0))
@@ -183,9 +230,12 @@ def build_series(store: CommunityStore, group_id: int, freq: str = "1h", stance_
             # the same two measures at a fixed sample size (RARE_K mentions); prefer these for analysis
             "entity_entropy_rare": rare_entropy,
             "topic_shift_rare": rare_shift,
+            **heat_and_novelty(w.entities, history, heat_windows, new_windows),
         }
         if w.entities:
             prev_entities = w.entities
+        history.append(w.entities)
+        del history[:-new_windows]
         if classes:
             probs = w.stance if w.stance is not None else np.zeros(len(classes))
             mass = dict(zip(classes, probs))
