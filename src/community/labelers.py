@@ -74,9 +74,12 @@ class OllamaLabeler:
     """
 
     def __init__(self, model: str = "qwen3:8b", url: str = "http://localhost:11434",
-                 num_ctx: int = 8192, timeout: float = 3600, think: Optional[bool] = False, prompt: str = "v2"):
+                 num_ctx: int = 8192, timeout: float = 3600, think: Optional[bool] = False, prompt: str = "v2",
+                 threads: Optional[int] = None, temperature: float = 0.0):
         self.model, self.url, self.num_ctx, self.timeout, self.think = model, url.rstrip("/"), num_ctx, timeout, think
         self.prompt = prompt
+        # threads: cap Ollama's CPU threads (num_thread) for this model, e.g. 2 on a shared machine
+        self.threads, self.temperature = threads, temperature
         self.name = source_name(model, prompt)
 
     def _body(self, system: str, user: str, schema: type[BaseModel]) -> dict:
@@ -85,7 +88,8 @@ class OllamaLabeler:
             "stream": False,
             "keep_alive": "30m",
             "format": schema.model_json_schema(),
-            "options": {"temperature": 0, "num_ctx": self.num_ctx},
+            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx,
+                        **({"num_thread": self.threads} if self.threads else {})},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -114,11 +118,14 @@ class OllamaLabeler:
             raise RuntimeError(f"Ollama {e.code}: {e.read().decode('utf-8', 'replace')[:200]}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"連不到 Ollama（{self.url}），請確認 Ollama 正在執行：{e.reason}") from e
+        # timing of the last call (Ollama reports durations in ns), for benchmarks
+        self.last_stats = {k: data.get(k) for k in
+                           ("prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration", "total_duration")}
         return schema.model_validate_json(data.get("message", {}).get("content", ""))
 
 
 def make_labeler(backend: str, model: Optional[str] = None, effort: Optional[str] = None,
-                 ollama_url: str = "http://localhost:11434", prompt: str = "v2"):
+                 ollama_url: str = "http://localhost:11434", prompt: str = "v2", threads: Optional[int] = None):
     if prompt not in PROMPTS:
         raise ValueError(f"unknown prompt version: {prompt}")
     if backend == "claude":
@@ -126,5 +133,5 @@ def make_labeler(backend: str, model: Optional[str] = None, effort: Optional[str
     if backend == "ollama":
         model = model or "qwen3:8b"
         think = False if model.startswith(("qwen3", "deepseek-r1")) else None
-        return OllamaLabeler(model, url=ollama_url, think=think, prompt=prompt)
+        return OllamaLabeler(model, url=ollama_url, think=think, prompt=prompt, threads=threads)
     raise ValueError(f"unknown backend: {backend}")

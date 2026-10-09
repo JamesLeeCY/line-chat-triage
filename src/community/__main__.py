@@ -147,7 +147,7 @@ def cmd_label(args):
     from .labelers import make_labeler
 
     labeler = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url,
-                           prompt=args.prompt)
+                           prompt=args.prompt, threads=args.threads)
     batch_size, workers = _batching(args)
     out = _labels_path(args.labels or labeler.name)
     print(f"[label] {args.backend}:{labeler.model} prompt {args.prompt} → {out}"
@@ -163,7 +163,8 @@ def cmd_critique(args):
     base = {r["id"]: r for r in read_jsonl(_labels_path(args.labels))}
     if not base:
         sys.exit(f"找不到標註來源 {args.labels}，目前有：{', '.join(_available_sources()) or '（無）'}")
-    judge = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url)
+    judge = make_labeler(args.backend, args.model, effort=args.effort, ollama_url=args.ollama_url,
+                         threads=args.threads)
     critic = Critic(judge, base, Path(args.labels).stem)
     batch_size, workers = _batching(args)
     out = _labels_path(args.out or critic.name)
@@ -387,6 +388,7 @@ def main(argv=None):
     p.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
                    help="只適用 Claude Opus / Sonnet；Haiku 與 Ollama 不支援")
     p.add_argument("--ollama-url", default="http://localhost:11434")
+    p.add_argument("--threads", type=int, default=None, help="Ollama 最多使用的 CPU 執行緒數（如 2）；預設由 Ollama 決定")
     p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--prompt", default="v2", choices=sorted(PROMPTS), help="提示詞版本（v1 結果存在不帶版本的檔名）")
     p.add_argument("--labels", default=None, help="輸出的標註來源名稱（預設用模型名＋提示詞版本）")
@@ -405,6 +407,7 @@ def main(argv=None):
     p.add_argument("--model", default=None, help="裁判模型，如 phi4；預設 ollama qwen3:8b、claude Haiku 4.5")
     p.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
     p.add_argument("--ollama-url", default="http://localhost:11434")
+    p.add_argument("--threads", type=int, default=None, help="Ollama 最多使用的 CPU 執行緒數（如 2）；預設由 Ollama 決定")
     p.add_argument("--sample", default=SAMPLE)
     p.add_argument("--out", default=None, help="輸出來源名稱（預設 <labels>+critic-<裁判模型>）")
     p.add_argument("--split", default="all")
