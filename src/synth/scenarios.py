@@ -171,12 +171,17 @@ def build_scenario(i: int, rng: random.Random) -> Scenario:
     if "unanswered_question" in alerts:
         # nothing from staff after this question until now (18:30): about 8 business hours
         slots = [s for s in slots if not (s.day == last and s.role == "staff" and s.time > "10:00")]
-        slots += [
+        question = [
             Slot(last, _t(10, rng.randrange(0, 20)), "customer", customer,
                  f"（我是客戶）問員工一個關於「{topics[0]}」、需要他們回答的具體問題", "unanswered_question"),
             Slot(last, _t(14, rng.randrange(0, 30)), "customer", customer,
                  "（我是客戶）追問剛才的問題，問有沒有人看到", "unanswered_question"),
         ]
+        # with the staff replies gone, a later "好，收到" from the customer thanks nobody and reads as
+        # if the question were answered; drop those acks too (no rng calls here, so every other
+        # scenario stays identical)
+        slots = [s for s in slots if not (s.day == last and s.role == "customer" and "簡短回應" in s.intent
+                                          and s.time > question[0].time)] + question
 
     slots.sort(key=lambda s: (s.day, s.time))
     now = datetime.combine(start + timedelta(days=last), NOW_TIME)

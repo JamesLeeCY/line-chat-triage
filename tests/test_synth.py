@@ -246,3 +246,10 @@ def test_progress_log_records_failures(tmp_path):
     assert stats["failed"] == 1
     row = json.loads((tmp_path / "progress.jsonl").read_text(encoding="utf-8"))
     assert row["status"] == "failed" and len(row["attempt_log"]) == 3 and "沒有內容" in row["error"]
+
+
+@pytest.mark.parametrize("sc", [s for s in SCENARIOS if "unanswered_question" in s.alerts], ids=lambda s: s.group)
+def test_unanswered_day_has_no_thanks_for_a_reply_that_never_came(sc):
+    last = max(s.day for s in sc.slots)
+    q = next(s.time for s in sc.slots if s.tag == "unanswered_question")
+    assert not [s for s in sc.slots if s.day == last and s.time > q and "簡短回應" in s.intent]
