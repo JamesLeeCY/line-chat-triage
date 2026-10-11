@@ -1,10 +1,14 @@
 """
 Model B: risk level and alerts per group, from the conversation alone.
 
-Two predictors with the same output shape ({group, risk_level, alerts, score}):
-- rule: the existing triage pipeline (I1–I6 metrics + tripwire) at the
-  group's own `now`, mapped to alerts by the thresholds below
-- llm:  a local model reads the conversation and answers directly
+Three predictors with the same output shape ({group, risk_level, alerts, score}):
+- rule:  the existing triage pipeline (I1–I6 metrics + tripwire) at the
+         group's own `now`, mapped to alerts by RuleThresholds
+- llm:   a local model reads the conversation and answers directly
+- combo: per alert, whichever of the two is reliable for it (see `combine`)
+
+All three derive the risk level from their alerts with the ground truth's own
+rule, so a level error always traces back to an alert error.
 
 The LLM is told the same business definitions the ground truth uses (not the
 rule system's keyword lists), so the comparison is about understanding the
@@ -13,6 +17,7 @@ conversation, not matching an implementation.
 import json
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -22,13 +27,27 @@ from pydantic import BaseModel, Field
 from .progress import call_stats, log_progress
 
 LEVELS = ("low", "medium", "high")
-
-# rule metrics → alerts; severities are 0..1 (warn → critical) in src.metrics
-RULE_ALERT_SEVERITY = 0.5
-RULE_HIGH, RULE_MEDIUM = 0.6, 0.3          # composite cut-offs for the risk level
+HIGH_ALERTS = {"unanswered_question", "escalation"}
 
 
-def predict_rule(conv_dir: str, truth: list[dict], employees_path: str) -> list[dict]:
+def level_from_alerts(alerts) -> str:
+    """The ground truth's own rule (scenarios._risk_level), so levels are scored on the same definition."""
+    alerts = set(alerts)
+    if alerts & HIGH_ALERTS or len(alerts) >= 2:
+        return "high"
+    return "medium" if alerts else "low"
+
+
+@dataclass(frozen=True)
+class RuleThresholds:
+    """Severity (0..1, warn → critical in src.metrics) at which a metric raises its alert."""
+    unanswered: float = 0.5
+    slow: float = 0.5
+    negative: float = 0.5
+
+
+def rule_metrics(conv_dir: str, truth: list[dict], employees_path: str) -> list[dict]:
+    """Run the existing triage pipeline once per group, at the group's own `now`."""
     from ..enrichment import enrich
     from ..metrics import compute_metrics
     from ..parser import load_employees, merge_fragments, parse_file
@@ -39,16 +58,54 @@ def predict_rule(conv_dir: str, truth: list[dict], employees_path: str) -> list[
         _, messages = parse_file(str(Path(conv_dir) / f"{t['group']}.txt"), employees)
         messages = enrich(merge_fragments(messages, window_secs=60))
         m = compute_metrics(t["group"], messages, now=datetime.fromisoformat(t["now"]))
+        out.append({"group": t["group"], "i1": m.i1_severity, "i2": m.i2_severity, "i4": m.i4_severity,
+                    "composite": round(m.composite, 4),
+                    # the tripwire also fires on a question unanswered for 8 business hours; only
+                    # escalation keywords count as an escalation alert
+                    "escalation_marker": any(r.startswith("升級詞") for r in m.tripwire_reasons)})
+    return out
+
+
+def rule_alerts(metrics: list[dict], th: RuleThresholds = RuleThresholds()) -> list[dict]:
+    out = []
+    for d in metrics:
         alerts = [name for name, on in (
-            ("unanswered_question", m.i1_severity >= RULE_ALERT_SEVERITY),
-            ("slow_response", m.i2_severity >= RULE_ALERT_SEVERITY),
-            ("escalation", m.tripwire),
-            ("negative_sentiment", m.i4_severity >= RULE_ALERT_SEVERITY),
+            ("unanswered_question", d["i1"] >= th.unanswered),
+            ("slow_response", d["i2"] >= th.slow),
+            ("escalation", d["escalation_marker"]),
+            ("negative_sentiment", d["i4"] >= th.negative),
         ) if on]
-        level = "high" if m.tripwire or m.composite >= RULE_HIGH else "medium" if m.composite >= RULE_MEDIUM else "low"
-        out.append({"group": t["group"], "risk_level": level, "alerts": alerts, "score": round(m.composite, 4),
-                    "detail": {"i1": m.i1_severity, "i2": m.i2_severity, "i4": m.i4_severity,
-                               "tripwire": m.tripwire}})
+        out.append({"group": d["group"], "risk_level": level_from_alerts(alerts), "alerts": alerts,
+                    "score": d["composite"], "detail": {k: d[k] for k in ("i1", "i2", "i4", "escalation_marker")}})
+    return out
+
+
+def predict_rule(conv_dir: str, truth: list[dict], employees_path: str,
+                 th: RuleThresholds = RuleThresholds()) -> list[dict]:
+    return rule_alerts(rule_metrics(conv_dir, truth, employees_path), th)
+
+
+# Which predictor each alert is taken from in the combination: the rule system for anything
+# that depends on timing (phi4 hallucinated unanswered questions 31 times in the 100-group run),
+# the LLM for sentiment (the rule lexicon caught none), either one for escalation.
+COMBO_FROM_RULE = {"unanswered_question", "slow_response"}
+COMBO_FROM_LLM = {"negative_sentiment"}
+COMBO_FROM_EITHER = {"escalation"}
+
+
+def combine(rule: list[dict], llm: list[dict]) -> list[dict]:
+    by_llm = {r["group"]: r for r in llm}
+    out = []
+    for r in rule:
+        m = by_llm.get(r["group"])
+        if m is None:
+            continue
+        ra, la = set(r["alerts"]), set(m["alerts"])
+        alerts = sorted((ra & COMBO_FROM_RULE) | (la & COMBO_FROM_LLM) | ((ra | la) & COMBO_FROM_EITHER))
+        level = level_from_alerts(alerts)
+        # rank by level first, the rule composite breaks ties
+        out.append({"group": r["group"], "risk_level": level, "alerts": alerts,
+                    "score": LEVELS.index(level) / 2 + r["score"] / 10})
     return out
 
 

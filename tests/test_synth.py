@@ -253,3 +253,76 @@ def test_unanswered_day_has_no_thanks_for_a_reply_that_never_came(sc):
     last = max(s.day for s in sc.slots)
     q = next(s.time for s in sc.slots if s.tag == "unanswered_question")
     assert not [s for s in sc.slots if s.day == last and s.time > q and "簡短回應" in s.intent]
+
+
+# --- improving B: split, thresholds, level rule, combination ---
+
+from src.synth.predict import RuleThresholds, combine, level_from_alerts, rule_alerts
+from src.synth.validate import best_threshold, make_split
+
+
+def test_level_from_alerts_matches_scenario_rule():
+    from src.synth.scenarios import _risk_level
+    for alerts in ([], ["slow_response"], ["negative_sentiment"], ["unanswered_question"], ["escalation"],
+                   ["slow_response", "negative_sentiment"]):
+        assert level_from_alerts(alerts) == _risk_level(alerts)
+
+
+def test_rule_alerts_escalation_only_from_keywords():
+    metrics = [{"group": "g", "i1": 1.0, "i2": 0.0, "i4": 0.0, "composite": 0.95, "escalation_marker": False}]
+    row = rule_alerts(metrics)[0]
+    # an 8-hour unanswered question also trips the tripwire, but it is not an escalation
+    assert row["alerts"] == ["unanswered_question"] and row["risk_level"] == "high"
+    metrics[0].update(i1=0.0, i2=0.2, i4=0.15)
+    assert rule_alerts(metrics)[0]["alerts"] == []
+    assert rule_alerts(metrics, RuleThresholds(slow=0.1, negative=0.1))[0]["alerts"] == \
+        ["slow_response", "negative_sentiment"]
+
+
+def test_combine_takes_each_alert_from_its_reliable_source():
+    rule = [{"group": "g", "alerts": ["slow_response", "escalation"], "score": 0.3}]
+    llm = [{"group": "g", "alerts": ["unanswered_question", "negative_sentiment"]}]
+    row = combine(rule, llm)[0]
+    assert row["alerts"] == ["escalation", "negative_sentiment", "slow_response"]   # not the LLM's unanswered
+    assert row["risk_level"] == "high"
+    assert combine(rule, []) == []
+
+
+def test_make_split_is_stratified_deterministic_and_forces_pilot_into_tune():
+    truth = [{"group": f"g{i:03d}", "risk_level": lvl} for i, lvl in
+             enumerate(["high"] * 48 + ["medium"] * 26 + ["low"] * 26)]
+    forced = {"g000", "g050", "g090"}
+    s1, s2 = make_split(truth, force_tune=forced), make_split(truth, force_tune=forced)
+    assert s1 == s2 and all(s1[g] == "tune" for g in forced)
+    for lvl, n in (("high", 48), ("medium", 26), ("low", 26)):
+        hold = sum(s1[t["group"]] == "holdout" for t in truth if t["risk_level"] == lvl)
+        assert hold == round(n / 2)
+
+
+def test_best_threshold_maximises_f1_and_breaks_ties_in_the_middle():
+    values = [0.05, 0.12, 0.2, 0.3, 0.4, 0.45]
+    positive = [False, False, False, True, True, True]
+    cut, f1 = best_threshold(values, positive)
+    assert f1 == 1.0 and 0.2 < cut <= 0.3
+
+
+@pytest.mark.parametrize("text,act", [
+    ("白板是不是磁吸式的？我怕會影響風格", "question"),     # question mark mid-message
+    ("請問明天幾點到", "question"),
+    ("收到", "ack"),
+])
+def test_question_detection_mid_sentence(make_msg, text, act):
+    from src.enrichment import classify_dialogue_act
+    assert classify_dialogue_act(make_msg("客戶A", "customer", "2025-09-01T10:00", text)) == act
+
+
+@pytest.mark.parametrize("text", ["你們主管是誰？", "這案子我不做了", "叫你們老闆出來", "我要退"])
+def test_escalation_paraphrases(text):
+    from src.enrichment import has_escalation_marker
+    assert has_escalation_marker(text)
+
+
+@pytest.mark.parametrize("text", ["你們是來裝潢還是來敷衍我？", "真的很煩，搞什麼", "這樣下去我真的無語"])
+def test_colloquial_negative(text):
+    from src.enrichment import score_sentiment
+    assert score_sentiment(text) < -0.1

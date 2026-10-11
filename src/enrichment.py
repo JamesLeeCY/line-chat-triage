@@ -10,6 +10,9 @@ from .parser import Message
 
 _QUESTION_PATTERNS = [
     r"[嗎呢？?]$",
+    # a question mark anywhere: chat questions often continue after it
+    # ("白板是不是磁吸式的？我怕會影響風格") — found by the synthetic benchmark (src/synth)
+    r"[？?]",
     r"^是否",
     r"^可以.{0,10}[嗎？?]",
     r"^有沒有",
@@ -92,6 +95,9 @@ _NEGATIVE_WORDS = [
     "退費", "退款", "退訂", "投訴", "換人", "不合理",
     # 其他
     "困擾", "麻煩", "擔心", "疑慮", "拍謝", "抱歉", "對不起",
+    # 口語不滿（合成評估中「越來越不滿」的客戶多用口語，原詞庫 0 / 25 命中）
+    "爛", "煩", "敷衍", "無語", "傻眼", "一團糟", "亂七八糟", "搞什麼", "受不了", "不爽",
+    "沒救", "很差", "太扯", "亂來", "怎麼又", "又延", "拖到", "越來越",
 ]
 _POSITIVE_WORDS = [
     "感謝", "謝謝", "感恩", "好的", "沒問題", "完美", "很好", "讚", "棒",
@@ -118,6 +124,9 @@ _ESCALATION_KEYWORDS = [
     "找你主管", "找你老闆", "找主管", "找老闆", "跟你主管談", "跟你老闆談",
     "找你們主管", "找你們老闆", "跟你們主管談", "跟你們老闆談",
     "解約", "取消合約", "告你", "法院", "消保", "消費者保護",
+    # asking for the boss / walking away, phrased without 找 or 退款
+    # ("你們主管是誰？" "這案子不做了") — found by the synthetic benchmark (src/synth)
+    "你們主管", "主管是誰", "叫主管", "老闆是誰", "叫你們老闆", "要退", "退掉", "不做了", "不想做了",
 ]
 
 

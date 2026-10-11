@@ -137,3 +137,42 @@ def format_scores(name: str, s: dict) -> str:
     conf = s["level_confusion"]
     lines.append("   等級混淆（真→預測）：" + "  ".join(f"{k}:{v}" for k, v in conf.items() if v))
     return "\n".join(lines)
+
+
+def make_split(truth: list[dict], holdout: float = 0.5, seed: int = 0, force_tune=()) -> dict:
+    """
+    Group → "tune" / "holdout", stratified by risk level. `force_tune` groups (e.g. the pilot
+    groups already looked at while designing the predictors) always go to the tune side and
+    count toward its share. Thresholds and keyword changes are chosen on "tune" only; the
+    reported numbers come from "holdout".
+    """
+    import random
+
+    rng = random.Random(seed)
+    split = {}
+    for level in ("low", "medium", "high"):
+        groups = sorted(t["group"] for t in truth if t["risk_level"] == level)
+        forced = [g for g in groups if g in force_tune]
+        rest = [g for g in groups if g not in force_tune]
+        rng.shuffle(rest)
+        n_holdout = min(len(rest), round(len(groups) * holdout))
+        for g in forced + rest[n_holdout:]:
+            split[g] = "tune"
+        for g in rest[:n_holdout]:
+            split[g] = "holdout"
+    return split
+
+
+def best_threshold(values: list[float], positive: list[bool], grid=None) -> tuple[float, float]:
+    """Severity cut-off maximising F1 of `value >= cut` against `positive`; ties → the middle one."""
+    grid = grid or [round(0.05 * k, 2) for k in range(1, 20)]
+    scored = []
+    for cut in grid:
+        tp = sum(v >= cut and p for v, p in zip(values, positive))
+        fp = sum(v >= cut and not p for v, p in zip(values, positive))
+        fn = sum(v < cut and p for v, p in zip(values, positive))
+        f1 = 2 * tp / (2 * tp + fp + fn) if tp else 0.0
+        scored.append((f1, cut))
+    top = max(f for f, _ in scored)
+    ties = [c for f, c in scored if f == top]
+    return ties[len(ties) // 2], top

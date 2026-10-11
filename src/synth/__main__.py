@@ -49,15 +49,41 @@ def cmd_generate(args):
     print(f"[generate] {generate(scenarios, model, str(_run_dir(args)))}")
 
 
+def _thresholds(run: Path):
+    from .predict import RuleThresholds
+
+    path = run / "thresholds.json"
+    if path.exists():
+        return RuleThresholds(**json.loads(path.read_text(encoding="utf-8"))["thresholds"]), path
+    return RuleThresholds(), None
+
+
+def _split(run: Path, truth: list[dict]) -> dict:
+    """Load run/split.json, creating it once; pilot groups (index < 10) are forced into "tune"."""
+    from .validate import make_split
+
+    path = run / "split.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    pilot = {t["group"] for t in truth if int(t["group"].rsplit("_", 1)[1]) < 10}
+    split = make_split(truth, force_tune=pilot)
+    path.write_text(json.dumps(split, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"[split] 建立 {path}：調整組 {sum(v == 'tune' for v in split.values())}、"
+          f"驗證組 {sum(v == 'holdout' for v in split.values())}")
+    return split
+
+
 def cmd_predict(args):
     from .predict import predict_llm, predict_rule
 
     run = _run_dir(args)
     truth = _truth(run)
-    rule = predict_rule(str(run / "conversations"), truth, str(run / "employees.txt"))
+    th, th_path = _thresholds(run)
+    rule = predict_rule(str(run / "conversations"), truth, str(run / "employees.txt"), th)
     (run / "pred_rule.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rule),
                                          encoding="utf-8")
-    print(f"[predict] 規則系統：{len(rule)} 個群組 → {run / 'pred_rule.jsonl'}")
+    print(f"[predict] 規則系統：{len(rule)} 個群組 → {run / 'pred_rule.jsonl'}"
+          f"（門檻 {th}，{'來自 ' + str(th_path) if th_path else '預設值'}）")
     if not args.skip_llm:
         print(f"[predict] {args.model}（threads={args.threads or '預設'}）")
         llm = predict_llm(str(run / "conversations"), truth, _ollama(args.model, args.threads),
@@ -75,31 +101,67 @@ def cmd_validate(args):
     print(f"[validate] {sum(r['faithful'] for r in rows)}/{len(rows)} 個群組符合劇本 → {run / 'fidelity.jsonl'}")
 
 
+def cmd_tune(args):
+    """Pick each rule threshold on the tune split only; writes run/thresholds.json."""
+    from .predict import rule_metrics
+    from .validate import best_threshold
+
+    run = _run_dir(args)
+    truth = _truth(run)
+    split = _split(run, truth)
+    tune = [t for t in truth if split[t["group"]] == "tune"]
+    metrics = {d["group"]: d for d in rule_metrics(str(run / "conversations"), tune, str(run / "employees.txt"))}
+    chosen, report = {}, {}
+    for field, metric, alert in (("unanswered", "i1", "unanswered_question"), ("slow", "i2", "slow_response"),
+                                 ("negative", "i4", "negative_sentiment")):
+        values = [metrics[t["group"]][metric] for t in tune]
+        positive = [alert in t["alerts"] for t in tune]
+        cut, f1 = best_threshold(values, positive)
+        chosen[field] = cut
+        report[field] = {"threshold": cut, "tune_f1": round(f1, 3), "positives": sum(positive)}
+        print(f"[tune] {alert:<20} 門檻 {cut:.2f}（調整組 F1 {f1:.2f}，{sum(positive)} 個正例 / {len(tune)} 組）")
+    (run / "thresholds.json").write_text(json.dumps({"thresholds": chosen, "tune_report": report}, indent=1),
+                                         encoding="utf-8")
+    print(f"[tune] → {run / 'thresholds.json'}；接著執行 predict --skip-llm 套用")
+
+
 def cmd_score(args):
+    from .predict import LEVELS, combine, level_from_alerts
     from .validate import format_scores, score
 
     run = _run_dir(args)
     truth = _truth(run)
+    if args.split != "all":
+        split = _split(run, truth)
+        truth = [t for t in truth if split[t["group"]] == args.split]
     fid_path = run / "fidelity.jsonl"
     faithful = None
     if fid_path.exists():
         faithful = {r["group"] for r in map(json.loads, fid_path.read_text(encoding="utf-8").splitlines())
                     if r["faithful"]}
-    results = {}
+    preds = {}
     for name in ("rule", "llm"):
         path = run / f"pred_{name}.jsonl"
-        if not path.exists():
-            continue
-        preds = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-        results[name] = {"all": score(truth, preds)}
-        print(format_scores(f"B-{name}，全部群組", results[name]["all"]))
+        if path.exists():
+            preds[name] = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    if "llm" in preds:
+        # the level follows from the alerts, as for the other predictors (phi4's own level kept aside)
+        preds["llm"] = [{**p, "reported_level": p["risk_level"], "risk_level": level_from_alerts(p["alerts"]),
+                         "score": LEVELS.index(level_from_alerts(p["alerts"])) / 2} for p in preds["llm"]]
+    if {"rule", "llm"} <= set(preds):
+        preds["combo"] = combine(preds["rule"], preds["llm"])
+    label = {"all": "全部群組", "tune": "調整組", "holdout": "驗證組"}[args.split]
+    results = {}
+    for name, rows in preds.items():
+        results[name] = {"all": score(truth, rows)}
+        print(format_scores(f"B-{name}，{label}", results[name]["all"]))
         if faithful is not None:
-            results[name]["faithful"] = score([t for t in truth if t["group"] in faithful], preds)
-            print(format_scores(f"B-{name}，只計 C 判定符合劇本的群組", results[name]["faithful"]))
+            results[name]["faithful"] = score([t for t in truth if t["group"] in faithful], rows)
+            print(format_scores(f"B-{name}，{label}，只計 C 判定符合劇本的群組", results[name]["faithful"]))
     if faithful is None:
         print("[score] 尚未執行 validate：以上分數未排除不符劇本的群組")
-    (run / "scores.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, default=float),
-                                     encoding="utf-8")
+    (run / f"scores_{args.split}.json").write_text(json.dumps(results, ensure_ascii=False, indent=2, default=float),
+                                                   encoding="utf-8")
 
 
 def cmd_bench(args):
@@ -175,7 +237,13 @@ def main(argv=None):
 
     p = sub.add_parser("score", help="B 對標準答案評分（有 validate 結果時另報只計符合劇本的群組）")
     p.add_argument("--run", default="pilot")
+    p.add_argument("--split", default="all", choices=["all", "tune", "holdout"],
+                   help="只評調整組或驗證組（第一次使用時建立 split.json）")
     p.set_defaults(func=cmd_score)
+
+    p = sub.add_parser("tune", help="只用調整組校準規則系統的門檻 → thresholds.json")
+    p.add_argument("--run", default="pilot")
+    p.set_defaults(func=cmd_tune)
 
     p = sub.add_parser("bench", help="以指定執行緒數實測 A、B 各一個群組的速度")
     p.add_argument("--threads", type=int, default=2)
