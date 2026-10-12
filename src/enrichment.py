@@ -105,10 +105,23 @@ _POSITIVE_WORDS = [
 ]
 
 
+# Phrases that contain a negative word but are not negative: politeness ("不好意思" holds 不好)
+# and yes/no questions about a problem ("有沒有問題" holds 有問題). Masked before matching, so
+# "品質不好" or "這裡有問題" still count. Found as false alarms by the synthetic benchmark.
+_NEUTRAL_PHRASES = [
+    "不好意思", "好不好", "有沒有問題", "有問題嗎", "會不會有問題", "是不是有問題", "是否有問題",
+    "有沒有不對", "對不對", "夠不夠", "不夠的話",
+    # found on the sample groups: approval, a conditional, polite requests ("麻煩" alone still counts)
+    "沒有問題", "有問題再", "麻煩你", "麻煩您", "麻煩幫",
+]
+
+
 def score_sentiment(text: str) -> float:
     """Return sentiment in [-1, 1]. Negative = bad."""
     if not text:
         return 0.0
+    for phrase in _NEUTRAL_PHRASES:
+        text = text.replace(phrase, " ")
     neg = sum(1 for w in _NEGATIVE_WORDS if w in text)
     pos = sum(1 for w in _POSITIVE_WORDS if w in text)
     total = neg + pos

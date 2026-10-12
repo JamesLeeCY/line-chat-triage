@@ -18,7 +18,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -44,6 +44,9 @@ class RuleThresholds:
     unanswered: float = 0.5
     slow: float = 0.5
     negative: float = 0.5
+    # "increasingly frustrated" needs more than one negative message: in real groups with five or
+    # six customer messages in 72 h, a single ambiguous one already pushes the ratio past 0.10
+    min_negative_msgs: int = 2
 
 
 def rule_metrics(conv_dir: str, truth: list[dict], employees_path: str) -> list[dict]:
@@ -57,9 +60,13 @@ def rule_metrics(conv_dir: str, truth: list[dict], employees_path: str) -> list[
     for t in truth:
         _, messages = parse_file(str(Path(conv_dir) / f"{t['group']}.txt"), employees)
         messages = enrich(merge_fragments(messages, window_secs=60))
-        m = compute_metrics(t["group"], messages, now=datetime.fromisoformat(t["now"]))
+        now = datetime.fromisoformat(t["now"])
+        m = compute_metrics(t["group"], messages, now=now)
+        # same window and cut-off as I4 in src.metrics
+        neg_count = sum(1 for msg in messages if msg.role == "customer" and not msg.is_sticker
+                        and now - timedelta(hours=72) <= msg.timestamp and (msg.sentiment or 0) < -0.1)
         out.append({"group": t["group"], "i1": m.i1_severity, "i2": m.i2_severity, "i4": m.i4_severity,
-                    "composite": round(m.composite, 4),
+                    "neg_count": neg_count, "composite": round(m.composite, 4),
                     # the tripwire also fires on a question unanswered for 8 business hours; only
                     # escalation keywords count as an escalation alert
                     "escalation_marker": any(r.startswith("升級詞") for r in m.tripwire_reasons)})
@@ -73,10 +80,11 @@ def rule_alerts(metrics: list[dict], th: RuleThresholds = RuleThresholds()) -> l
             ("unanswered_question", d["i1"] >= th.unanswered),
             ("slow_response", d["i2"] >= th.slow),
             ("escalation", d["escalation_marker"]),
-            ("negative_sentiment", d["i4"] >= th.negative),
+            ("negative_sentiment", d["i4"] >= th.negative and d["neg_count"] >= th.min_negative_msgs),
         ) if on]
         out.append({"group": d["group"], "risk_level": level_from_alerts(alerts), "alerts": alerts,
-                    "score": d["composite"], "detail": {k: d[k] for k in ("i1", "i2", "i4", "escalation_marker")}})
+                    "score": d["composite"],
+                    "detail": {k: d[k] for k in ("i1", "i2", "i4", "neg_count", "escalation_marker")}})
     return out
 
 

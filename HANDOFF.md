@@ -1,6 +1,6 @@
 # HANDOFF — 社群模式（股票社群多空分析）與合成評估（主管群組警示驗證）
 
-最後更新：2026-10-11（合成評估：100 群組完成，待改善 B）
+最後更新：2026-10-12（合成評估：改善 B、全新驗證集、範例群組檢查完成）
 
 本文件記錄社群模式目前的進度、實驗結果與下一步，供下一次接手（人或 Claude）直接延續。
 **本 repo 為公開 repo**：所有群組訊息、標註與資料庫都在 `data/community/`、`data/telegram/`（已排除於版控），本文件只記錄統計數字，不引用任何真實訊息內容。
@@ -377,29 +377,57 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
   - **phi4**：語意強（negative 80% 命中且 0 誤報；escalation 96%，換句話說也抓得到），時間推理弱（unanswered 精確率 45%、after_hours 誘餌誤報 10 / 19）。
   - 剩下最大的缺口是 slow_response（兩者都幾乎抓不到）；組合的錯誤主要是 medium 被判成 low（12 組），正是 slow 漏掉所致。
 
-### 8.4 指令
+### 8.4 改善 B（2026-10-11 ～ 10-12）
 
-跑滿 100 群組（使用者在自己的終端機執行；`full` 沿用 pilot3 的前 10 組，劇本由 seed 決定，前 10 個相同）：
+**做法**：100 組依風險等級分層切成調整組 50 / 驗證組 50（`data/synth/full/split.json`；pilot3 的 10 組強制在調整組）。
+所有修改與門檻只看調整組；驗證組只評一次。
+
+1. **評估換算的錯誤**（`src/synth/predict.py`）：
+   - 「提問 8 個工作小時無人回」也會觸發 tripwire，先前被算成 escalation（100 組時的 2 個揚言誤報 072、079 皆因此）→ 只認「升級詞」觸發的 tripwire。
+   - 風險等級改由警示依標準答案的同一套規則推出（`level_from_alerts`）；先前用 composite 門檻，只有 unanswered 的群組（composite ≈ 0.35）被判成 medium。
+   - 規則系統拆成 `rule_metrics`（只算一次）與 `rule_alerts`（套門檻），組合做成正式選項 `combine`（時間類用規則、不滿用 LLM、揚言任一）。
+2. **現有系統的改善**（`src/enrichment.py`，`main.py` 同樣受惠）：
+   - `_QUESTION_PATTERNS` 加入句中問號。
+   - `_NEGATIVE_WORDS` 加入口語不滿（爛、煩、敷衍、無語、傻眼、一團糟、搞什麼…）。
+   - `_ESCALATION_KEYWORDS` 加入你們主管、主管是誰、叫主管、要退、退掉、不做了…。
+   - `_NEUTRAL_PHRASES`：比對負面詞前先遮掉禮貌用語、詢問、認可、條件句、客氣請求（不好意思、有沒有問題、沒有問題、有問題再、麻煩你…）。
+3. **門檻**（`python -m src.synth tune --run full`，只看調整組，寫入 `thresholds.json`）：unanswered 0.5、slow 0.10、negative 0.10；
+   另規定「越來越不滿」至少 2 則負面訊息（`RuleThresholds.min_negative_msgs = 2`）。門檻只用於合成評估的換算，`main.py` 不使用。
+
+**結果**（風險等級正確率）：
+
+| | 改善前 | 調整組 | 驗證組 | 全新驗證集（seed 1） |
+|---|---|---|---|---|
+| 規則系統 | 約 48%（100 組） | 96% | 94% | 98% → **100%**（加入遮蔽後） |
+| 組合 | 80%（100 組） | 90% | 98% | **100%** |
+| phi4 | 65%（100 組） | 72% | 66% | 70% |
+
+- 全新驗證集：`data/synth/fresh/`（50 組，與原本 100 組無重複；生成 0 失敗、4 組各重寫一天、平均 10.2 分 / 組；phi4 4.2 分 / 組）。
+  門檻凍結（`fresh/thresholds.json` 為 full 的複本）。揚言 15 / 15、0 誤報 — 關鍵字不只適用於看過的例句。
+- phi4 時間推理仍不可靠（全新驗證集「提問無人回」誤報 21、精確率 28%）；組合避開了它。
+- **範例群組檢查**（`data/conversations/` 10 組，now = 2025-09-05 17:00）：只套新門檻時 3 組（健身房、民宿、餐廳）從 low 變 medium，
+  逐則檢查全是誤報（「沒有問題！」含「有問題」、「麻煩你幫我查」、我新加的「煩」重複命中「麻煩」、「有問題再說」）；
+  真實群組 72 小時內只有 5–6 則客戶訊息，一則誤判就超過 0.10。補上遮蔽與「至少 2 則」後回到 low。
+  另 2 組（住宅翻新、科技公司大廳）新增的 negative 經逐則檢查為真的不滿，改善前漏掉。`main.py` 只有那 3 組 composite 下降，高風險排名不變。
+- **資料污染紀錄**：部分升級關鍵字在切分前看過全部 100 組的漏報後才加；遮蔽清單看過全新驗證集與範例群組的誤報後才加
+  → 全新驗證集與範例群組已不是這兩項修正的乾淨驗證。
+
+### 8.5 指令
 
 ```bash
-python -c "import shutil; shutil.copytree('data/synth/pilot3', 'data/synth/full')"
-python -X utf8 -m src.synth generate --run full --n 100 --threads 2   # A：約 14 小時
-python -X utf8 -m src.synth predict --run full --threads 2            # B：規則系統 + phi4，約 8 小時（--skip-llm 只跑規則）
-python -X utf8 -m src.synth validate --run full                       # C：需 ANTHROPIC_API_KEY，約 30–60 分、3–8 美元
-python -X utf8 -m src.synth score --run full                          # 有 validate 結果時另報「只計符合劇本的群組」
-python -X utf8 -m src.synth bench --threads 2                         # 2 核實測一個完整群組（A + B）
+python -X utf8 -m src.synth generate --run full --n 100 --threads 2   # A（可續跑）
+python -X utf8 -m src.synth predict --run full --threads 2            # B：規則系統 + phi4（--skip-llm 只跑規則，幾秒）
+python -X utf8 -m src.synth tune --run full                           # 只用調整組校準門檻 → thresholds.json
+python -X utf8 -m src.synth score --run full --split tune             # 也可 --split holdout / all；同時評 rule、llm、combo
+python -X utf8 -m src.synth generate --run fresh --n 50 --total 50 --seed 1 --threads 2   # 全新驗證集
+python -X utf8 -m src.synth validate --run full                       # C：需 ANTHROPIC_API_KEY
+python -X utf8 -m src.synth bench --threads 2                         # 2 核實測一個完整群組
 ```
 
-進度：`data/synth/full/progress.jsonl`（每組一行）。中斷後重跑同一指令即從斷點繼續。
+進度：`data/synth/<run>/progress.jsonl`（每組一行）。中斷後重跑同一指令即從斷點繼續。
 
-### 8.5 下一步
+### 8.6 下一步
 
-1. **改善 B（調整組 / 驗證組）**：把 100 組依風險等級分層切成約 50 / 50，只在調整組上改、在驗證組上報分數（pilot3 的前 10 組已被看過，放在調整組）。
-   - slow_response 門檻降到約 0.3（依調整組決定）；
-   - 提問偵測加入句中問號（「是不是…？」「…嗎？…」）；
-   - 等級換算改成與定義一致（unanswered 或 escalation → high）；
-   - 擴充升級關鍵字（主管是誰、這筆錢我不要了…）與口語情緒詞（爛爛的、煩死了、敷衍、無語…）；
-   - 把組合做成 `predict` 的正式選項；時間類警示不採用 phi4。
-   - 注意：改 `enrichment.py` 會影響客服 triage 主程式，需同時跑既有測試。
-2. 使用者設定 `ANTHROPIC_API_KEY` 後跑 C，排除不符劇本的群組，並重報分數。
-3. 調整完成後，可用另一個 seed 再生成一批（例如 50 組）當全新的驗證集。
+1. 使用者設定 `ANTHROPIC_API_KEY` 後跑 C（full 與 fresh），排除不符劇本的群組並重報分數。
+2. 若要再確認遮蔽與門檻：需要另一批沒看過的資料 — 新的 seed（例如 seed 2，50 組約 12 小時），或使用者提供的真實群組（需人工判讀）。
+3. 「越來越不滿」與「揚言」的界線：目前揚言群組的不滿會同時觸發 negative（等級不受影響）；若要分開，可在 escalation 成立時不另報 negative。

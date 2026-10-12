@@ -269,14 +269,18 @@ def test_level_from_alerts_matches_scenario_rule():
 
 
 def test_rule_alerts_escalation_only_from_keywords():
-    metrics = [{"group": "g", "i1": 1.0, "i2": 0.0, "i4": 0.0, "composite": 0.95, "escalation_marker": False}]
+    metrics = [{"group": "g", "i1": 1.0, "i2": 0.0, "i4": 0.0, "neg_count": 0, "composite": 0.95,
+                "escalation_marker": False}]
     row = rule_alerts(metrics)[0]
     # an 8-hour unanswered question also trips the tripwire, but it is not an escalation
     assert row["alerts"] == ["unanswered_question"] and row["risk_level"] == "high"
-    metrics[0].update(i1=0.0, i2=0.2, i4=0.15)
+    metrics[0].update(i1=0.0, i2=0.2, i4=0.15, neg_count=2)
     assert rule_alerts(metrics)[0]["alerts"] == []
-    assert rule_alerts(metrics, RuleThresholds(slow=0.1, negative=0.1))[0]["alerts"] == \
-        ["slow_response", "negative_sentiment"]
+    tuned = RuleThresholds(slow=0.1, negative=0.1)
+    assert rule_alerts(metrics, tuned)[0]["alerts"] == ["slow_response", "negative_sentiment"]
+    # one negative message is not "increasingly" frustrated, however high the ratio
+    metrics[0].update(i4=0.3, neg_count=1)
+    assert rule_alerts(metrics, tuned)[0]["alerts"] == ["slow_response"]
 
 
 def test_combine_takes_each_alert_from_its_reliable_source():
@@ -326,3 +330,20 @@ def test_escalation_paraphrases(text):
 def test_colloquial_negative(text):
     from src.enrichment import score_sentiment
     assert score_sentiment(text) < -0.1
+
+
+@pytest.mark.parametrize("text,negative", [
+    ("不好意思打擾，咖啡機配電是不是要另外開路線？", False),   # politeness, not 不好
+    ("吧台台面今天有沒有問題？", False),                      # a question, not a complaint
+    ("數量夠不夠？", False),
+    ("合約內容我看過了，沒有問題！", False),                   # found on the sample groups
+    ("好，麻煩你幫我查", False),
+    ("嗯，我會繼續看完，有問題再說。", False),
+    ("這樣改來改去真麻煩", True),
+    ("品質不好", True),
+    ("這裡有問題", True),
+    ("空間不夠", True),
+])
+def test_sentiment_masks_polite_and_question_phrases(text, negative):
+    from src.enrichment import score_sentiment
+    assert (score_sentiment(text) < -0.1) == negative
