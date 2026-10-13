@@ -1,6 +1,6 @@
 # HANDOFF — 社群模式（股票社群多空分析）與合成評估（主管群組警示驗證）
 
-最後更新：2026-10-12（合成評估：改善 B、全新驗證集、範例群組檢查完成）
+最後更新：2026-10-13（合成評估：C 驗證移出計畫；下一步以真實群組驗證為優先）
 
 本文件記錄社群模式目前的進度、實驗結果與下一步，供下一次接手（人或 Claude）直接延續。
 **本 repo 為公開 repo**：所有群組訊息、標註與資料庫都在 `data/community/`、`data/telegram/`（已排除於版控），本文件只記錄統計數字，不引用任何真實訊息內容。
@@ -257,7 +257,7 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 | `src/community/timeseries.py` | 每時間窗的訊息量、標的 entropy、話題轉移（含固定樣本數版）、多空；CLI `series` |
 | `src/community/predict.py` | 下一窗爆量 / 話題轉移 / 情緒反轉預測，逐層特徵消融與區塊 bootstrap CI；CLI `predict` |
 | `src/community/critique.py` | AI 批改迴圈：裁判依憑法檢查題審查標註 |
-| `src/synth/` | 合成評估：`scenarios.py` 劇本與標準答案、`generate.py`（A）、`predict.py`（B）、`validate.py`（C 與計分）、CLI `python -m src.synth` |
+| `src/synth/` | 合成評估：`scenarios.py` 劇本與標準答案、`generate.py`（A）、`predict.py`（B）、`validate.py`（計分、切分、門檻校準；C 驗證程式保留但已移出計畫）、CLI `python -m src.synth` |
 | `src/community/review.py` | 待標清單（AI 判多空全收＋中立對照抽樣）與分層權重 |
 | `src/community/compare.py` | 各標註來源 vs 人工：accuracy、macro-F1、Cohen's kappa（支援分層加權） |
 | `src/community/classifier.py` | 可替換分類器介面、TF-IDF + 邏輯迴歸、多數類別基準 |
@@ -286,7 +286,16 @@ TF-IDF + 邏輯迴歸（v2 enrich_train）以人工標註為答案：隨機 macr
 | 劇本 | 程式（`scenarios.py`） | 每群組 4 個平日（避開週末，因服務時間是平日 09:00–18:00）、平均 27 則（22–36），決定每則的時間、發言者、意圖，並埋入風險與誘餌 |
 | A 生成 | 本機 qwen3:8b，2 核 | 只把每則意圖寫成台灣口語 LINE 訊息，輸出 LINE 匯出格式（現有 parser 直接讀） |
 | B 預測 | 現有規則系統 **和** 本機 phi4（2 核） | 同一輸出格式：風險等級 + 警示清單。B 原本也用 qwen3，使用者改 phi4 以避免「自己出題自己解」 |
-| C 驗證 | Claude（`claude-opus-5-5`） | 檢查對話是否真的表達劇本（揚言像揚言、誘餌沒有意外變危險）；**B 對程式埋的標準答案計分，不對另一個 AI 的意見計分** |
+| ~~C 驗證~~ | ~~Claude（`claude-opus-5-5`）~~ | **2026-10-13 移出計畫**（見下）。原規劃：檢查對話是否真的表達劇本 |
+
+**B 對程式埋的標準答案計分，不對另一個 AI 的意見計分** — 這點不受 C 影響。
+
+**C 移出計畫（2026-10-13，使用者決定）**：這台電腦一直沒有 Claude 憑證，使用者決定不跑 C。
+- 對話品質改由以下三層把關：① 時間、發言者、意圖由程式決定，標準答案依構造成立；② 生成時的 `who` 照抄與口吻檢查
+  （錯位或口吻不符就重寫該天；full 100 組、fresh 50 組重寫後皆 0 則錯位）；③ 人工抽查 — 埋入風險的訊息、所有誤報與漏報都逐則看過，未發現不符劇本的群組。
+- 因此本節所有分數都是**未經 C 自動篩選**的數字；限制是人工抽查沒有逐字看完全部 4,011 則訊息（full 2,652 + fresh 1,359）。
+- 不改用本機 phi4 當 C：AI 批改迴圈（第 5 節第 3 步）已顯示本機模型當裁判的效果不好（phi4 審查 qwen3 改對 16、改錯 16）。
+- `validate.py` 的 `check_fidelity` 與 CLI `validate` 保留未刪，日後若有憑證可直接使用（約 1 小時、5–10 美元可跑完 full + fresh）。
 
 - 埋入的風險：`unanswered_question`（提問後 ≥ 6 個工作小時無人回）、`slow_response`（員工經常隔數小時才回）、
   `escalation`（72 小時內揚言退款 / 投訴 / 解約 / 找主管）、`negative_sentiment`（越來越不滿但未揚言）。
@@ -420,7 +429,7 @@ python -X utf8 -m src.synth predict --run full --threads 2            # B：規�
 python -X utf8 -m src.synth tune --run full                           # 只用調整組校準門檻 → thresholds.json
 python -X utf8 -m src.synth score --run full --split tune             # 也可 --split holdout / all；同時評 rule、llm、combo
 python -X utf8 -m src.synth generate --run fresh --n 50 --total 50 --seed 1 --threads 2   # 全新驗證集
-python -X utf8 -m src.synth validate --run full                       # C：需 ANTHROPIC_API_KEY
+python -X utf8 -m src.synth validate --run full                       # C：已移出計畫（程式保留，需 ANTHROPIC_API_KEY）
 python -X utf8 -m src.synth bench --threads 2                         # 2 核實測一個完整群組
 ```
 
@@ -428,6 +437,10 @@ python -X utf8 -m src.synth bench --threads 2                         # 2 核實
 
 ### 8.6 下一步
 
-1. 使用者設定 `ANTHROPIC_API_KEY` 後跑 C（full 與 fresh），排除不符劇本的群組並重報分數。
-2. 若要再確認遮蔽與門檻：需要另一批沒看過的資料 — 新的 seed（例如 seed 2，50 組約 12 小時），或使用者提供的真實群組（需人工判讀）。
-3. 「越來越不滿」與「揚言」的界線：目前揚言群組的不滿會同時觸發 negative（等級不受影響）；若要分開，可在 escalation 成立時不另報 negative。
+合成評估已達到規則系統在全新驗證集 100% 等級正確率；繼續在合成資料上投入大量運算的資訊量有限（2026-10-13 評估）。
+
+1. **以真實客服群組驗證（優先）**：合成資料「太乾淨」— 範例群組檢查就暴露了合成資料看不到的 3 個情緒誤判。
+   需要使用者提供真實工作群組的匯出檔，或接上 LINE webhook 開始收訊息；再逐則判讀警示是否合理。
+2. （選做）新 seed 的 50 組合成資料（例如 seed 2，2 核約 12 小時），只為乾淨驗證最後兩項修正（情緒遮蔽、至少 2 則負面訊息）。
+3. （選做）「越來越不滿」與「揚言」的界線：目前揚言群組的不滿會同時觸發 negative（等級不受影響）；若要分開，可在 escalation 成立時不另報 negative。
+4. ~~跑 C~~：已移出計畫（見 8.1）。

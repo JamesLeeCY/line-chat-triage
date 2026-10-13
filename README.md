@@ -287,7 +287,12 @@ python -X utf8 -m src.community predict --freq 4h   # 預測下一時間窗的�
 | 劇本 | 程式 | 每群組 4 個平日、約 27 則訊息；決定每則的時間、發言者與意圖，埋入風險與誘餌，標準答案因此必然成立 |
 | A 生成 | 本機 qwen3:8b | 只把每則意圖寫成台灣口語的 LINE 訊息，輸出 LINE 匯出格式 |
 | B 預測 | 現有規則系統、本機 phi4 | 只看對話，輸出風險等級與警示 |
-| C 驗證 | Claude | 檢查對話是否真的表達劇本；B 對程式埋的標準答案計分，而不是對另一個 AI 的意見計分 |
+| ~~C 驗證~~ | ~~Claude~~ | **已移出計畫**（2026-10-13，見下） |
+
+B 一律對**程式埋的標準答案**計分，而不是對另一個 AI 的意見計分。
+原規劃由 C（Claude）自動檢查對話是否真的表達劇本；因未使用 Claude API，C 已移出計畫，對話品質改由三層把關：
+程式決定時間、發言者與意圖（標準答案依構造成立）、生成時的發言者照抄與口吻檢查（不合格的那天重寫）、人工抽查埋入風險的訊息與所有誤報 / 漏報。
+以下所有分數皆未經 C 自動篩選；`validate` 程式保留，日後有 `ANTHROPIC_API_KEY` 仍可使用。
 
 - **埋入的風險**：提問超過 6 個工作小時無人回、員工經常很晚才回、72 小時內揚言退款 / 投訴 / 找主管、客戶越來越不滿但未揚言。
 - **誘餌**（不該觸發警示）：超過 72 小時前已解決的揚言、深夜提問隔天一早就有回覆 — 用來量誤報。
@@ -297,7 +302,7 @@ python -X utf8 -m src.community predict --freq 4h   # 預測下一時間窗的�
 python -X utf8 -m src.synth bench --threads 2                 # 以 2 核實測 A、B 的速度
 python -X utf8 -m src.synth generate --n 10 --threads 2       # A：生成前 10 個群組與標準答案（可續跑）
 python -X utf8 -m src.synth predict --threads 2               # B：規則系統 + phi4
-python -X utf8 -m src.synth validate                          # C：需 ANTHROPIC_API_KEY
+python -X utf8 -m src.synth validate                          # C：已移出計畫（程式保留，需 ANTHROPIC_API_KEY）
 python -X utf8 -m src.synth score                             # 對標準答案評分
 ```
 
@@ -314,7 +319,7 @@ python -X utf8 -m src.synth score                             # 對標準答案�
 
 - 生成：10 / 10 成功，**0 次重寫**，每組 4 次呼叫、平均約 9 分鐘；B（phi4）每組約 4–6 分鐘。100 個群組估計約 27 小時（2 核）。
 - 人工抽查埋入風險的訊息，皆符合劇本（例：「我現在真的要退了，你們主管是誰？」「你們是來裝潢還是來敷衍我？」；已解決的揚言之後客戶都表示滿意）。
-  C（Claude）尚未執行，以下分數**未經 C 篩選**。
+  以下分數**未經 C 自動篩選**（C 已移出計畫）。
 
 | | 規則系統 | phi4 | 組合（參考） |
 |---|---|---|---|
@@ -338,7 +343,7 @@ python -X utf8 -m src.synth score                             # 對標準答案�
 
 - 生成：100 / 100 成功（0 失敗），共 2,667 則訊息；5 組各有 1–2 天重寫，重寫後 0 則錯位；平均每組 9.5 分鐘（2 核）。風險分布 high 48 / medium 26 / low 26。
 - 評估時發現並修正劇本瑕疵：30 個「提問無人回」群組中有 15 組，在員工根本沒回的情況下客戶仍回了「好，收到」。已從劇本與資料中移除（其餘 85 組不受影響）。
-- phi4 每組平均 4.6 分鐘。**C（Claude）尚未執行，以下分數未經 C 篩選。**
+- phi4 每組平均 4.6 分鐘。以下分數**未經 C 自動篩選**（C 已移出計畫）。
 
 | | 規則系統 | phi4 | **組合** |
 |---|---|---|---|
@@ -392,7 +397,7 @@ python -X utf8 -m src.synth score                             # 對標準答案�
 - 組合與規則系統只差在「越來越不滿」：規則系統抓得全但有 3 個誤報，phi4 較保守（9 / 11、0 誤報）。兩者在驗證組差 1–2 組，屬雜訊範圍。
 - phi4 單獨使用不適合：「提問無人回」誤報 17 次、深夜提問誘餌 10 個誤報 7 個。
 - **限制**：門檻（尤其兩個 0.10）是在合成資料上校準的，合成客戶除了埋入的不滿之外都很客氣，真實群組未必如此 — 這些門檻只用於合成評估，`main.py` 不使用。
-  部分升級關鍵字是在切分前看過全部 100 組的漏報後想到的，驗證組的揚言命中可能略為樂觀。C 尚未執行。
+  部分升級關鍵字是在切分前看過全部 100 組的漏報後想到的，驗證組的揚言命中可能略為樂觀。
 
 **全新驗證集（2026-10-12，seed 1，50 組）**
 
@@ -431,9 +436,9 @@ python -X utf8 -m src.synth score                             # 對標準答案�
 - 修正後調整組與全新驗證集的分數不變或變好（全新驗證集規則系統 98% → 100%、「越來越不滿」誤報 5 → 3）。
   但這兩項修正是看了全新驗證集與範例群組的誤報才做的，**這兩批資料已不再是乾淨的驗證**。
 
-**限制**：門檻在合成資料上校準，範例群組只有 10 個；C 尚未執行。
+**限制**：門檻在合成資料上校準，範例群組只有 10 個；分數未經 C 自動篩選（C 已移出計畫）。
 
-**下一步**：設定 `ANTHROPIC_API_KEY` 後跑 C；若要再確認，需另一批沒看過的資料（新的 seed 或真實群組）。細節見 [HANDOFF.md](HANDOFF.md) 第 8 節。
+**下一步**：合成評估已達到規則系統在全新驗證集 100% 等級正確率，再投入大量運算在合成資料上的資訊量有限。下一步以**真實客服群組**驗證為優先（範例群組就暴露了合成資料看不到的誤判）；新 seed 的合成資料僅為選做。細節見 [HANDOFF.md](HANDOFF.md) 第 8 節。
 
 ### 接收 LINE 即時訊息（webhook）
 
@@ -465,7 +470,7 @@ python -X utf8 tools/replay_export.py data/conversations/*.txt --url http://loca
 
 | 變數 | 說明 |
 |------|------|
-| `ANTHROPIC_API_KEY` | Claude API 金鑰（`main.py --llm`、社群模式 `--backend claude`、合成評估 `validate` 需要） |
+| `ANTHROPIC_API_KEY` | Claude API 金鑰（`main.py --llm`、社群模式 `--backend claude` 需要；合成評估的 `validate` 已移出計畫） |
 | `LINE_CHANNEL_SECRET` | 驗證 webhook 簽章（webhook 必填） |
 | `LINE_CHANNEL_ACCESS_TOKEN` | 查詢群組名稱與成員顯示名稱（選填；未設定時以 userId 顯示） |
 | `LINE_DB_PATH` | webhook 資料庫路徑（預設 `data/line.db`） |
@@ -495,7 +500,7 @@ line_chat/
 │   ├── line_store.py         # SQLite 儲存，輸出與 parse_file 相同的 Message
 │   ├── telegram_export.py    # Telegram Desktop JSON 匯出解析
 │   ├── community/            # 社群模式：SQLite 儲存、抽樣、標註器、AI 批改、人工標註網頁、分類器、標的抽取、entropy 時間序列、預測
-│   └── synth/                # 合成評估：劇本與標準答案、A 生成、B 預測（規則 / LLM）、C 驗證與評分
+│   └── synth/                # 合成評估：劇本與標準答案、A 生成、B 預測（規則 / LLM / 組合）、評分與門檻校準
 ├── tools/
 │   └── replay_export.py      # 將匯出檔重播為 webhook 事件（本機演練用）
 ├── tests/                    # pytest
