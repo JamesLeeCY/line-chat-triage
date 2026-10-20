@@ -477,6 +477,9 @@ LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍�
    ```bash
    uvicorn src.line_webhook:create_app_from_env --factory --port 8000
    ```
+   > **Windows 注意**：若啟動時出現 `[WinError 10013]`（存取通訊端被拒），通常是該 port 落在 Windows 預留的範圍（Hyper-V / WSL / Docker 會保留一段 port，即使沒有程式在用也無法綁定）。
+   > 用 `netsh int ipv4 show excludedportrange protocol=tcp` 查看預留範圍，改用範圍外的 port（例如開發機上 8724–8823 被預留，8765 失敗，8000 可用）；
+   > 換 port 時，`ngrok http <port>` 也要跟著改。
 4. Developers Console → Webhook URL 填 `https://<host>/callback`，開啟 Use webhook，按 Verify
 5. 把官方帳號邀進群組；收到訊息後列出成員 userId，將員工的 userId 加入 `employees.txt`（可加 `# 註解` 標示姓名）：
    ```bash
