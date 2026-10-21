@@ -473,19 +473,40 @@ LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍�
 
 1. 在 LINE Official Account Manager 建立官方帳號並啟用 Messaging API，於 LINE Developers Console 取得 **Channel secret** 與 **Channel access token**
 2. 官方帳號設定：開啟「允許加入群組」，並**關閉自動回應訊息與加入好友歡迎訊息**，避免 Bot 在客戶群組裡發言
-3. 啟動 webhook（開發時可用 `ngrok http 8000` 取得公開 HTTPS 網址）：
+3. 啟動 webhook（`LINE_CHANNEL_SECRET` 必填；金鑰只在自己的終端機設定，不要寫進檔案或 commit）：
    ```bash
    uvicorn src.line_webhook:create_app_from_env --factory --port 8000
    ```
    > **Windows 注意**：若啟動時出現 `[WinError 10013]`（存取通訊端被拒），通常是該 port 落在 Windows 預留的範圍（Hyper-V / WSL / Docker 會保留一段 port，即使沒有程式在用也無法綁定）。
    > 用 `netsh int ipv4 show excludedportrange protocol=tcp` 查看預留範圍，改用範圍外的 port（例如開發機上 8724–8823 被預留，8765 失敗，8000 可用）；
    > 換 port 時，`ngrok http <port>` 也要跟著改。
-4. Developers Console → Webhook URL 填 `https://<host>/callback`，開啟 Use webhook，按 Verify
-5. 把官方帳號邀進群組；收到訊息後列出成員 userId，將員工的 userId 加入 `employees.txt`（可加 `# 註解` 標示姓名）：
+4. 用 ngrok 取得公開 HTTPS 網址（LINE 只能把訊息送到公開的 HTTPS 網址）：
+   - 到 ngrok 官網註冊免費帳號，在 dashboard 的 **Your Authtoken** 複製 authtoken。
+   - 安裝（Windows，擇一），裝完重開終端機後以 `ngrok version` 確認：
+     ```bash
+     winget install --id Ngrok.Ngrok -e
+     ```
+     ```bash
+     scoop install ngrok
+     ```
+   - 綁定帳號（只需一次；authtoken 等同密碼，只在自己的終端機輸入）：
+     ```bash
+     ngrok config add-authtoken <你的 authtoken>
+     ```
+   - 在**另一個**終端機啟動通道，畫面上 `Forwarding` 那行的 `https://xxxx.ngrok-free.app` 就是公開網址：
+     ```bash
+     ngrok http 8000
+     ```
+   - 建議在 dashboard 的 **Domains** 領一個固定網域（免費帳號的方案以 ngrok 官網為準），改用
+     `ngrok http --url=<固定網域> 8000` 啟動，網址就不會每次重開都改變，不必回 LINE 重填。
+   - webhook 伺服器與 ngrok 兩個視窗都要一直開著；任一個關掉或電腦重開機，那段時間的訊息就收不到，重開機後兩個都要重新啟動。
+     `http://localhost:4040` 是 ngrok 的本機監看頁，可看到每個 LINE 送來的請求，排錯時好用。
+5. Developers Console → Webhook URL 填 `https://<ngrok 網址>/callback`，開啟 Use webhook，按 Verify
+6. 把官方帳號邀進群組（先告知群組成員 Bot 會記錄訊息）；收到訊息後列出成員 userId，將員工的 userId 加入 `employees.txt`（可加 `# 註解` 標示姓名）：
    ```bash
    python -X utf8 -m src.line_store data/line.db
    ```
-6. 從資料庫跑 triage：
+7. 從資料庫跑 triage：
    ```bash
    python -X utf8 main.py --line-db data/line.db --report
    ```
