@@ -471,8 +471,26 @@ python -X utf8 -m src.synth score                             # 對標準答案�
 
 LINE Bot 只能收到它加入群組**之後**的訊息；加入前的歷史仍需用匯出 `.txt`。
 
-1. 在 LINE Official Account Manager 建立官方帳號並啟用 Messaging API，於 LINE Developers Console 取得 **Channel secret** 與 **Channel access token**
-2. 官方帳號設定：開啟「允許加入群組」，並**關閉自動回應訊息與加入好友歡迎訊息**，避免 Bot 在客戶群組裡發言
+1. 建立官方帳號並取得金鑰（免費；只收訊息不發訊息，不會用到付費訊息額度。LINE 介面偶有改版，按鈕名稱以網站為準）：
+   - **建立帳號**：到 LINE Official Account Manager（manager.line.biz）用個人 LINE 或 email 登入（首次需建立 LINE Business ID），
+     點「建立LINE官方帳號」。**帳號名稱群組成員都看得到**，建議用中性、看得出用途的名稱（例如「專案進度紀錄」）；地區選台灣。
+     建立後是「未認證帳號」，不需申請認證即可加入群組、接收訊息。
+   - **啟用 Messaging API**：在帳號的「設定」→「Messaging API」→「啟用Messaging API」，選擇或建立一個 Provider（開發者名稱）並同意條款。
+   - **取得金鑰**：到 LINE Developers Console（developers.line.biz）→ 該 Provider → 對應的 Channel：
+     - **Channel secret**：「Basic settings」分頁下方（程式用它驗證訊息確實來自 LINE）
+     - **Channel access token**：「Messaging API」分頁最下方按「Issue」產生長期 token（程式用它查群組與成員名稱）
+   - 兩把金鑰等同密碼：只在自己的終端機設定，不要貼到對話、寫進檔案或 commit；外洩時可在同一頁重新產生。
+2. 官方帳號設定（Official Account Manager →「設定」），讓 Bot 只收訊息、不在客戶群組裡發言：
+
+   | 位置 | 設定 | 原因 |
+   |---|---|---|
+   | 帳號設定 → 功能切換 | 加入群組或多人聊天室：**接受邀請** | 否則無法被邀進群組 |
+   | 回應設定 | 自動回應訊息：**關閉** | 避免 Bot 在群組裡自動發言 |
+   | 回應設定 | 加入好友的歡迎訊息：**關閉** | 同上 |
+   | 回應設定 | Webhook：**開啟** | 讓訊息轉送給本程式 |
+
+   Webhook 的網址等第 4 步有了 ngrok 公開網址後，再於第 5 步填寫。
+   之後要邀進群組時：先用自己的 LINE 加官方帳號為好友（首頁有 QR code / ID），再從好友名單邀請它進群組。
 3. 啟動 webhook（`LINE_CHANNEL_SECRET` 必填；金鑰只在自己的終端機設定，不要寫進檔案或 commit）：
    ```bash
    uvicorn src.line_webhook:create_app_from_env --factory --port 8000
